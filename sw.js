@@ -3,7 +3,7 @@
  * 目的はオフライン起動だけ。データはGAS側にあり、そちらはキャッシュしない。
  * アプリを更新したら CACHE の数字を上げること。
  */
-const CACHE = 'fridge-v2';
+const CACHE = 'fridge-v4';
 const SHELL = [
   './',
   './index.html',
