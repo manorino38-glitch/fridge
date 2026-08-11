@@ -272,6 +272,9 @@ function dispatch_(action, p) {
     case 'setCategories': return apiSetConf_('categories', p.categories);
     case 'setOutKinds':   return apiSetConf_('outKinds', p.outKinds);
     case 'setUnits':      return apiSetConf_('units', p.units);
+    case 'readReceipt':   return apiReadReceipt_(p);
+    case 'setOcrKey':     return apiSetOcrKey_(p);
+    case 'ocrStatus':     return apiOcrStatus_(p);
     case 'ping':          return { ok: true, at: nowStr_() };
     default:              return { ok: false, error: '不明なaction: ' + action };
   }
@@ -315,6 +318,7 @@ function apiBootstrap_(p) {
     lots: stock,
     summary: buildSummary_(p.ym || today_().slice(0, 7)),
     day: buildDay_(today_()),
+    ocr: { hasKey: !!ocrKey_() },
   };
 }
 
@@ -434,6 +438,14 @@ function apiAddLots_(p) {
         setCell_(shFoods, fr, col_('foods', '前回の量'), qty, '0.############');
         setCell_(shFoods, fr, col_('foods', '前回の円'), yen, '0.############');
         setCell_(shFoods, fr, col_('foods', '更新日時'), now, '@');
+
+        // レシートの表記が自分の呼び方と違ったら、表記ゆれとして覚えておく。
+        // 次に同じ店で同じ品物を買ったとき、一発で当たるようになる
+        const merged = addAlias_(String(food['表記ゆれ']), String(it.alias || ''), String(food['品名']));
+        if (merged !== null) {
+          setCell_(shFoods, fr, col_('foods', '表記ゆれ'), merged, '@');
+          food['表記ゆれ'] = merged;
+        }
       }
     });
 
@@ -798,6 +810,204 @@ function daysElapsed_(ym) {
   if (ym === t.slice(0, 7)) return Number(t.slice(8, 10));
   if (ym > t.slice(0, 7)) return 1;
   return new Date(y, m, 0).getDate();
+}
+
+
+/* =============================================================================
+ * レシート読取（仕様書 7-1 / 7-2）
+ *
+ * 写真は保存しない。受け取った画像をそのまま読取に渡し、
+ * 品名・金額・日付だけを受け取って、画像は捨てる。ドライブにも残らない。
+ * APIキーはスクリプトプロパティに置く。シートにもURLにもリポジトリにも出ない。
+ * ===========================================================================*/
+
+const OCR_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+const OCR_MODEL = 'gemini-3.6-flash';
+const OCR_KEY_PROP = 'OCR_API_KEY';
+
+/** レシートから取り出したいものの形。ここを足せば取れる項目が増える */
+const OCR_SCHEMA = {
+  type: 'object',
+  properties: {
+    date:  { type: 'string', description: '購入日。yyyy-MM-dd。読み取れなければ空文字' },
+    store: { type: 'string', description: '店名。読み取れなければ空文字' },
+    items: {
+      type: 'array',
+      description: '買った品物の行だけ',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'レシートに印字された品名のまま' },
+          yen:  { type: 'number', description: '税込の支払額。値引が紐づく行は引いたあとの額' },
+          qty:  { type: 'number', description: '品名から内容量が分かるときだけ。「牛乳1000ml」なら1000。不明なら0' },
+          unit: { type: 'string', description: 'qtyの単位。g / ml / 個 / 本 / 枚 のいずれか。不明なら空文字' },
+        },
+        required: ['name', 'yen'],
+      },
+    },
+  },
+  required: ['date', 'items'],
+};
+
+const OCR_PROMPT = [
+  '日本のスーパーやコンビニのレシートの写真です。買った品物の行だけを取り出してください。',
+  '',
+  '守ってほしいこと:',
+  '- 小計・合計・お預り・お釣り・現金・クレジット・電子マネー・税・ポイント・レジ番号・',
+  '  責任者・電話番号・住所・買上点数は品物ではないので出さない。',
+  '- 「値引」「割引」「○○引」が直前の品物にかかっている場合は、引いたあとの金額を',
+  '  その品物の金額として出す。値引の行そのものは出さない。',
+  '- 数量2などでまとまっている行は、その行の合計額を出す（1個あたりに割らない）。',
+  '- 金額は税込を優先する。税抜しか印字されていなければ税抜のままでよい。',
+  '- 品名はレシートに印字されたとおりに写す。省略形も記号もそのまま。読めない文字は推測しない。',
+  '- 購入日は yyyy-MM-dd。令和などの和暦は西暦に直す。年の印字がなければ空文字にする。',
+  '- 品物が1つも読み取れなければ items は空配列にする。写っていないものを作らない。',
+].join('\n');
+
+/** 品物ではない行。読み取り側が混ぜてきたときの保険 */
+const OCR_DROP = /^(小計|合計|総合計|課税|非課税|税|外税|内税|消費税|お預り|預り|お釣|釣銭|釣り|現金|クレジット|カード|電子マネー|チャージ|ポイント|値引|割引|クーポン|レジ|責任者|点数|買上|お買上|領収|登録番号|№|No)/;
+
+/**
+ * 表記ゆれ列に1つ足す。足す必要がなければ null を返す。
+ * 品名そのもの・すでに入っている表記・空文字は足さない。
+ */
+function addAlias_(current, alias, foodName) {
+  const a = String(alias || '').trim();
+  if (!a) return null;
+  if (a === String(foodName || '').trim()) return null;
+
+  const list = String(current || '').split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+  const key = normName_(a);
+  if (list.some(function (s) { return normName_(s) === key; })) return null;
+
+  list.push(a);
+  return list.join(',');
+}
+
+/**
+ * 突き合わせ用に品名をならす。全角と半角、記号、空白の違いを無視する。
+ * 画面側の normalizeFoodName() と同じ規則にしてある。
+ */
+function normName_(s) {
+  return String(s || '')
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xfee0); })
+    .replace(/[\s　]/g, '')
+    .replace(/[()（）\[\]【】"'`,.・･:：;；\/／\-ー－_]/g, '')
+    .toLowerCase();
+}
+
+function ocrKey_() { return PropertiesService.getScriptProperties().getProperty(OCR_KEY_PROP) || ''; }
+
+/** キーそのものは絶対に返さない。あるかないかだけ */
+function apiOcrStatus_() {
+  return { ok: true, hasKey: !!ocrKey_(), model: OCR_MODEL };
+}
+
+function apiSetOcrKey_(p) {
+  const key = String(p && p.key == null ? '' : p.key).trim();
+  const props = PropertiesService.getScriptProperties();
+  if (!key) { props.deleteProperty(OCR_KEY_PROP); return { ok: true, hasKey: false }; }
+  if (key.length < 20) return { ok: false, error: 'キーが短すぎます。貼り間違いかもしれません' };
+  props.setProperty(OCR_KEY_PROP, key);
+  return { ok: true, hasKey: true };
+}
+
+function apiReadReceipt_(p) {
+  const key = ocrKey_();
+  if (!key) return { ok: false, error: 'レシート読取のキーが未設定です。設定から貼ってください', needKey: true };
+
+  const image = String((p && p.image) || '').replace(/^data:[^,]*,/, '');
+  if (!image) return { ok: false, error: '画像がありません' };
+  // インライン画像は合計20MBまで。余裕を見て切る
+  if (image.length > 18 * 1024 * 1024) return { ok: false, error: '画像が大きすぎます。もう少し小さくして送ってください' };
+
+  const body = {
+    model: OCR_MODEL,
+    input: [
+      { type: 'text', text: OCR_PROMPT },
+      { type: 'image', data: image, mime_type: String((p && p.mime) || 'image/jpeg') },
+    ],
+    response_format: { type: 'text', mime_type: 'application/json', schema: OCR_SCHEMA },
+  };
+
+  const res = UrlFetchApp.fetch(OCR_ENDPOINT, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-goog-api-key': key },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+  if (code !== 200) return { ok: false, error: ocrHttpError_(code, text), httpCode: code };
+
+  let raw;
+  try { raw = JSON.parse(text); } catch (e) { return { ok: false, error: '読み取り結果を解釈できませんでした' }; }
+
+  const jsonText = pickOcrText_(raw);
+  if (!jsonText) return { ok: false, error: '読み取り結果が空でした', shape: Object.keys(raw || {}).join(',') };
+
+  let out;
+  try { out = JSON.parse(jsonText); }
+  catch (e) { return { ok: false, error: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります' }; }
+
+  return { ok: true, receipt: cleanReceipt_(out) };
+}
+
+/**
+ * 応答の入れ物の名前が変わっても本文を拾えるようにしておく。
+ * 送った側の文面を拾わないよう、出力側の入れ物だけを見る。
+ */
+function pickOcrText_(raw) {
+  if (!raw) return '';
+  if (typeof raw.output_text === 'string' && raw.output_text) return raw.output_text;
+  const buf = [];
+  function walk(v, d) {
+    if (!v || d > 6) return;
+    if (Array.isArray(v)) { v.forEach(function (x) { walk(x, d + 1); }); return; }
+    if (typeof v !== 'object') return;
+    if (typeof v.output_text === 'string') buf.push(v.output_text);
+    if (typeof v.text === 'string') buf.push(v.text);
+    ['content', 'parts', 'output', 'outputs', 'message', 'delta', 'candidates'].forEach(function (k) { walk(v[k], d + 1); });
+  }
+  ['output', 'outputs', 'candidates', 'content', 'response', 'result', 'message'].forEach(function (k) { walk(raw[k], 0); });
+  const hit = buf.filter(function (s) { return s && s.indexOf('{') >= 0; })[0];
+  return hit || buf[0] || '';
+}
+
+/** 数値や日付の形をそろえ、品物でない行を落とす */
+function cleanReceipt_(o) {
+  const date = d2s_(String((o && o.date) || ''));
+  const items = ((o && o.items) || []).map(function (it) {
+    const qty = num_(it && it.qty);
+    return {
+      name: String((it && it.name) || '').trim(),
+      yen:  num_(it && it.yen),
+      qty:  qty > 0 ? qty : 0,
+      unit: String((it && it.unit) || '').trim(),
+    };
+  }).filter(function (it) {
+    if (!it.name) return false;
+    if (!(it.yen > 0)) return false;
+    return !OCR_DROP.test(it.name.replace(/[\s　]/g, ''));
+  });
+
+  return {
+    date:  /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : '',
+    store: String((o && o.store) || '').trim(),
+    items: items,
+  };
+}
+
+function ocrHttpError_(code, text) {
+  let msg = '';
+  try { const j = JSON.parse(text); msg = (j && j.error && (j.error.message || j.error.status)) || ''; } catch (e) {}
+  if (code === 400 && /api[ _-]?key/i.test(msg)) return 'キーが正しくないようです。設定から貼り直してください';
+  if (code === 401 || code === 403) return 'キーが使えませんでした。設定から貼り直してください';
+  if (code === 429) return '読み取りの回数制限に当たりました。少し待ってからもう一度';
+  if (code >= 500) return '読み取り側が一時的に応答しませんでした。もう一度試してください';
+  return '読み取りに失敗しました（' + code + '）' + (msg ? ': ' + msg.slice(0, 120) : '');
 }
 
 
