@@ -209,6 +209,13 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 
 /* ---------- 冷蔵庫 ---------- */
 .ftop{position:sticky;top:0;z-index:20;background:var(--bg);padding:0 0 12px;margin-top:-2px}
+.recdate{display:flex;align-items:center;gap:9px;margin-top:9px;flex-wrap:wrap}
+.recdate input[type=date]{width:auto;flex:none;height:38px;font-size:14px;padding:0 10px}
+.recdate .lab{font-size:11px;font-weight:800;letter-spacing:.06em;color:var(--ink-2)}
+.recdate .warn{font-size:12px;font-weight:700;color:var(--warn)}
+.recdate .warn button{margin-left:8px;font-size:11px;font-weight:800;color:var(--warn);
+  border:1.5px solid var(--warn);border-radius:99px;padding:4px 10px}
+.foot .amt.past{color:var(--warn);font-weight:800}
 .mealseg{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;background:var(--tint);border-radius:14px;padding:5px}
 .mealseg button{height:42px;border-radius:10px;font-size:15px;font-weight:700;color:#6b675f}
 .mealseg button.on{background:var(--surface);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.13)}
@@ -364,7 +371,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-11c';
+var APP_VERSION = '2026-08-12a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -506,6 +513,7 @@ var S = {
   categories: [], foods: [], lots: [], meals: ['朝','昼','夕','間食'], outKinds: [], units: ['g','ml','個','本','枚'],
   summary: null, day: null, serverDate: '', ym: '',
   meal: '夕', mealTouched: false,
+  recDate: '', recDateTouched: false,   // 冷蔵庫タブの記録日。既定は今日
   ent: {}, kind: {}, sel: {}, open: null,
   makePrep: false,
   buyMode: 'lot', buyFood: null, buyQuery: '',
@@ -742,7 +750,16 @@ $('#tabs').addEventListener('click', function (e) {
 /* 日付は「アプリを開いた日」ではなく「今この瞬間の日」に追従させる。
    アプリを開きっぱなしで日をまたぐと、前日の日付のまま登録されてしまうため。
    ただし自分で日付を変えたときは、その値を尊重する（過去レシートの連続投入のため）。 */
-function rollDate() { if (!S.buyDateTouched) S.buyDate = todayStr(); }
+function rollDate() {
+  if (!S.buyDateTouched) S.buyDate = todayStr();
+  if (!S.recDateTouched) S.recDate = todayStr();
+}
+function recDate() { return S.recDate || todayStr(); }
+function recIsToday() { return recDate() === todayStr(); }
+/** 過去日を選んだときの時刻。その日の食事区分に合う無難な時刻を入れる */
+function mealTime(meal) {
+  return { '朝': '08:00:00', '昼': '12:30:00', '夕': '19:00:00', '間食': '15:30:00' }[meal] || '12:00:00';
+}
 function dateWarnHtml() {
   return (S.buyDate && S.buyDate !== todayStr())
     ? '今日（' + fmtMD(todayStr()) + '）ではありません<button type="button" id="bToday">今日にする</button>' : '';
@@ -1012,6 +1029,26 @@ function showLinkFallback(link) {
 }
 
 /* ----------------------------------------------------------------- 冷蔵庫 */
+/** 記録日の欄。既定は今日。過去にするとオレンジで知らせる */
+function recDateHtml() {
+  return '<div class="recdate">' +
+    '<span class="lab">記録日</span>' +
+    '<input id="rDate" type="date" value="' + esc(recDate()) + '">' +
+    '<span class="warn" id="rWarn">' + recWarnHtml() + '</span>' +
+  '</div>';
+}
+function recWarnHtml() {
+  return recIsToday() ? '' :
+    fmtMD(recDate()) + ' として記録します<button type="button" id="rToday">今日にする</button>';
+}
+function paintRecWarn() {
+  var el = $('#rWarn');
+  if (!el) return;
+  el.innerHTML = recWarnHtml();
+  var b = $('#rToday');
+  if (b) b.onclick = function () { S.recDateTouched = false; S.recDate = todayStr(); renderFridge(); renderFoot(); };
+}
+
 function renderFridge() {
   var el = $('#v-fridge');
   var stock = stockByFood();
@@ -1020,10 +1057,11 @@ function renderFridge() {
   var head =
     '<div class="ftop"><div class="mealseg' + (S.makePrep ? ' dim' : '') + '" id="mealSeg">' +
       S.meals.map(function (m) { return '<button data-meal="' + m + '"' + (m === S.meal ? ' class="on"' : '') + '>' + m + '</button>'; }).join('') +
-    '</div></div>';
+    '</div>' + recDateHtml() + '</div>';
 
   if (!foodIds.length) {
     el.innerHTML = head + '<div class="empty">在庫がありません。<br>「仕入」タブから買ったものを登録してください。</div>';
+    paintRecWarn();
     return;
   }
 
@@ -1053,6 +1091,7 @@ function renderFridge() {
             '</div>';
   });
   el.innerHTML = html;
+  paintRecWarn();   // 「今日にする」を押せる状態にしておく
 }
 
 function rowHtml(foodId, lots, cat) {
@@ -1112,6 +1151,14 @@ function rowHtml(foodId, lots, cat) {
     '</div>';
   return row + detail;
 }
+
+$('#v-fridge').addEventListener('change', function (e) {
+  if (e.target.id !== 'rDate') return;
+  S.recDate = e.target.value || todayStr();
+  S.recDateTouched = true;
+  paintRecWarn();
+  renderFoot();
+});
 
 $('#v-fridge').addEventListener('click', function (e) {
   var mb = e.target.closest('#mealSeg button');
@@ -1187,12 +1234,15 @@ function renderFoot() {
   el.innerHTML =
     '<div class="pre">' +
       '<label><input type="checkbox" id="cPrep"' + (S.makePrep ? ' checked' : '') + '>作り置きにする</label>' +
-      '<span class="amt">' + (p.length
+      '<span class="amt' + (recIsToday() ? '' : ' past') + '">' + (p.length
         ? p.length + '件 ' + yen1(sum) + (w ? '（うち廃棄 ' + yen1(w) + '）' : '')
-        : '今日 ' + yen(S.day ? S.day.total : 0)) + '</span>' +
+        : (recIsToday() ? '今日 ' + yen(S.day ? S.day.total : 0)
+                        : fmtMD(recDate()) + ' に記録します')) + '</span>' +
     '</div>' +
     '<button class="btn" id="bRec"' + (p.length && !S.loading ? '' : ' disabled') + '>' +
-      (S.loading ? '記録中…' : (S.makePrep ? '作り置きにする' : 'まとめて記録')) + '</button>';
+      (S.loading ? '記録中…'
+        : (S.makePrep ? '作り置きにする'
+        : (recIsToday() ? 'まとめて記録' : fmtMD(recDate()) + ' に記録'))) + '</button>';
 
   if (S.tab === 'fridge') document.documentElement.style.setProperty('--footh', el.offsetHeight + 'px');
 
@@ -1231,7 +1281,9 @@ function doRecord() {
 function send(p, prepName) {
   var recMeal = S.meal;              // 記録後に自動判定へ戻すので、表示用に控えておく
   var payload = {
-    meal: recMeal, datetime: nowStr(),
+    meal: recMeal,
+    // 今日ならいまの時刻。過去日ならその食事区分に合う時刻を入れて、一覧の並び順を保つ
+    datetime: recIsToday() ? nowStr() : (recDate() + ' ' + mealTime(recMeal)),
     makePrep: !!prepName, prepName: prepName,
     entries: p.map(function (x) { return { lotId: x.lotId, qty: x.qty, kind: x.kind }; }),
   };
@@ -1246,7 +1298,7 @@ function send(p, prepName) {
   });
   var localCost = p.reduce(function (a, x) { return a + x.qty * x.lot.perU; }, 0);
   if (prepName) {
-    S.lots.push({ id: 'tmp' + oid, date: todayStr(), foodId: 'tmp' + oid, name: prepName, unit: '%',
+    S.lots.push({ id: 'tmp' + oid, date: recDate(), foodId: 'tmp' + oid, name: prepName, unit: '%',
                   qty: 100, yen: localCost, perU: localCost / 100, remain: 100, status: '在庫あり', source: '作り置き' });
     S.foods.push({ id: 'tmp' + oid, name: prepName, category: '作り置き', unit: '%', tracked: true, lastQty: 100, lastYen: 0, lastBuy: '' });
   }
