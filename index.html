@@ -129,6 +129,31 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .prow .g span{display:block;font-size:11px;color:var(--ink-3);margin-top:1px}
 .prow .r{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
 
+/* ---------- 形5: レシートの下書き ---------- */
+.drow{border:1.5px solid var(--line-2);border-radius:14px;padding:11px 12px 12px;margin-bottom:8px;background:var(--surface)}
+.drow.off{opacity:.42}
+.drow.new{border-color:var(--warn);background:var(--warn-tint)}
+.drow .t{display:flex;align-items:baseline;gap:10px}
+.drow .t b{font-size:15px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.drow .t .y{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap}
+.drow .t .x{font-size:11px;font-weight:800;color:var(--ink-3);padding:2px 6px;flex:none}
+.drow .m{font-size:11px;color:var(--ink-2);margin-top:3px;line-height:1.6}
+.drow .m .tagnew{color:var(--warn);font-weight:800}
+.drow .m .hit{color:var(--accent);font-weight:800}
+.drow .f{display:flex;gap:8px;margin-top:9px}
+.drow .f > *{flex:1;min-width:0}
+.drow .f .inw input{height:44px;font-size:16px}
+.drow .f select{height:44px;font-size:14px}
+.dhd{display:flex;align-items:center;gap:10px;margin:18px 0 9px}
+.dhd b{font-size:13px;font-weight:800;letter-spacing:.04em}
+.dhd .rule{flex:1}
+.dbar{position:sticky;top:0;z-index:5;background:var(--bg);padding:2px 0 12px;margin-bottom:2px}
+.dbar .in{display:flex;align-items:center;gap:10px;background:var(--accent-tint);border:1.5px solid var(--accent);
+  border-radius:14px;padding:11px 13px}
+.dbar .in b{flex:1;font-size:14px;font-weight:800}
+.prog{height:8px;border-radius:99px;background:var(--line-2);overflow:hidden;margin-top:10px}
+.prog i{display:block;height:100%;background:var(--accent);transition:width .25s}
+
 .muted{color:var(--ink-2)} .small{font-size:12px} .tiny{font-size:11px}
 .empty{text-align:center;color:var(--ink-3);padding:44px 20px;font-size:14px;line-height:1.9}
 
@@ -339,7 +364,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-11b';
+var APP_VERSION = '2026-08-11c';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -489,6 +514,9 @@ var S = {
   expKind: '', expMeal: '',
   pickDay: null,
   loading: false,
+  ocrHasKey: false,
+  draft: null,        // レシートから起こした仕入の下書き
+  ocrBusy: null,      // 読み取り中の進み具合 {done, total, err}
 };
 
 var $  = function (s, r) { return (r || document).querySelector(s); };
@@ -506,6 +534,14 @@ function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad(d.g
 function nowStr() { var d = new Date(); return todayStr() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
 function opId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function fmtMD(d) { var p = String(d).split('-'); return p.length === 3 ? (Number(p[1]) + '/' + Number(p[2])) : d; }
+/** レシートの見出し用。今年なら月日だけ、去年以前なら年も出す */
+function fmtReceiptDate(d) {
+  var p = String(d).split('-');
+  if (p.length !== 3) return String(d);
+  var wd = ['日','月','火','水','木','金','土'][new Date(p[0], Number(p[1]) - 1, Number(p[2])).getDay()];
+  var head = (p[0] === todayStr().slice(0, 4)) ? '' : (p[0] + '年');
+  return head + Number(p[1]) + '月' + Number(p[2]) + '日（' + wd + '）';
+}
 
 /* ---- 単位 ---------------------------------------------------------------
  * 単位は食材ごとに持つ。%の計算は単位に依存しないので、仕組みは共通のまま。
@@ -647,6 +683,7 @@ function applyBootstrap(r) {
   S.summary = r.summary;
   if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
+  if (r.ocr) S.ocrHasKey = !!r.ocr.hasKey;
 }
 
 function refresh(silent) {
@@ -893,6 +930,18 @@ function showSettings() {
       '<div class="inw wide"><input id="sUnits" value="' + esc(S.units.join(',')) + '"></div></label>' +
     '<div style="height:6px"></div>' +
     '<button class="btn" id="sSave">保存</button>' +
+    '<div class="sect"><h2>レシート読取</h2><div class="rule"></div>' +
+      '<span class="hint">' + (S.ocrHasKey ? '使えます' : '未設定') + '</span></div>' +
+    '<label class="fld"><span>APIキー（Google AI Studio で作った文字列）</span>' +
+      '<div class="inw wide"><input id="sOcr" type="password" placeholder="' +
+        (S.ocrHasKey ? '設定済み。変えるときだけ入れてください' : 'AIza…') +
+        '" autocapitalize="off" autocomplete="off" spellcheck="false"></div></label>' +
+    '<div class="duo">' +
+      '<button class="btn line" id="sOcrSave">キーを保存</button>' +
+      '<button class="btn quiet" id="sOcrClear">キーを消す</button>' +
+    '</div>' +
+    '<p class="tiny muted" style="margin:8px 2px 0;line-height:1.8">キーはスプレッドシートにもリンクにも入りません。' +
+    'GASのスクリプトプロパティに入り、読み取りのときだけ使われます。レシート写真は保存されません。</p>' +
     '<div class="sect"><h2>接続</h2><div class="rule"></div></div>' +
     '<div class="panel">' +
       '<div class="kv"><span class="k">保存できる端末か</span><span class="v">' + (STORAGE_OK ? 'はい' : '<span style="color:var(--danger)">いいえ</span>') + '</span></div>' +
@@ -932,6 +981,25 @@ function showSettings() {
       .then(function () { toast('保存しました'); });
   };
   $('#sReconn').onclick = function () { closeSheet(); showSetup(); };
+
+  $('#sOcrSave').onclick = function () {
+    var k = $('#sOcr').value.trim();
+    if (!k) return toastErr('キーを入れてください');
+    this.disabled = true;
+    call('setOcrKey', { key: k }).then(function (r) {
+      $('#sOcrSave').disabled = false;
+      if (!r || !r.ok) return toastErr((r && r.error) || '保存できませんでした');
+      $('#sOcr').value = '';
+      S.ocrHasKey = true;
+      closeSheet(); renderAll();
+      toast('レシート読取が使えるようになりました');
+    });
+  };
+  $('#sOcrClear').onclick = function () {
+    call('setOcrKey', { key: '' }).then(function () {
+      S.ocrHasKey = false; closeSheet(); renderAll(); toast('キーを消しました');
+    });
+  };
 }
 
 /** クリップボードが使えないときは、選択してコピーできる形で出す */
@@ -1238,6 +1306,12 @@ function renderBuy() {
 }
 
 function buyLotHtml() {
+  if (S.ocrBusy) return ocrBusyHtml();
+  if (S.draft) return draftHtml();
+  return buyPickHtml();
+}
+
+function buyPickHtml() {
   var q = S.buyQuery.trim();
   var list = S.foods.filter(function (f) { return f.category !== '作り置き'; });
   if (q) list = list.filter(function (f) { return f.name.indexOf(q) >= 0 || (f.aliases || '').indexOf(q) >= 0; });
@@ -1274,7 +1348,11 @@ function buyLotHtml() {
       '</div>';
   }
 
-  return panel +
+  var receipt = S.ocrHasKey
+    ? '<button class="btn line" id="bReceipt" style="margin-bottom:16px">レシートを読む</button>'
+    : '<button class="btn quiet" id="bReceiptOff" style="margin-bottom:16px">レシートを読む（設定が必要）</button>';
+
+  return receipt + panel +
     dateFieldHtml('bDate', '購入日（過去の日付も入れられます）') +
     '<div class="sect"><h2>食材</h2><div class="rule"></div><span class="hint">最近買った順</span></div>' +
     '<label class="fld"><div class="inw wide"><input id="bQuery" type="search" placeholder="絞り込み" value="' + esc(S.buyQuery) + '" autocapitalize="off"></div></label>' +
@@ -1319,6 +1397,7 @@ function buyLogHtml() {
 }
 
 function bindBuy() {
+  bindDraft();
   var seg = $('#buySeg');
   if (seg) seg.onclick = function (e) {
     var b = e.target.closest('[data-bm]'); if (!b) return;
@@ -1536,35 +1615,421 @@ function showFoodSheet(foodId) {
 function showEditFood(foodId) { showFoodSheet(foodId); }
 
 /* ============================================================================
- * 【将来の拡張ポイント】レシートOCR（仕様書 7-1）
+ * レシート読取（仕様書 7-1 / 7-2）
  *
- * OCRで品名・金額・日付を取り出したら、この関数に渡せば仕入に反映できる。
- * 追加が必要なのは「画像を読んで items を作る部分」だけで、
- * 登録の経路（addLots は複数件を一括で受ける / 由来列 / 過去日付）は用意済み。
- *
- *   applyReceiptDraft([{ name:'豚小間切落とし', yen:598, date:'2026-08-01' }, ...])
- *
- * name は食材マスタの「表記ゆれ」を通して正規化する。
- * 内容量はレシートに載らない前提なので、ここでは前回値を入れておく。
+ * 写真 → 縮小 → GAS → 品名と金額 → 下書きの行 → 内容量を埋めて一括登録。
+ * 登録の経路は手入力とまったく同じ addLots を通る。違うのは由来だけ。
  * ==========================================================================*/
+
+/** 突き合わせ用に品名をならす。GAS側の normName_() と同じ規則 */
+function normalizeName(raw) {
+  return String(raw || '')
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xfee0); })
+    .replace(/[\s　]/g, '')
+    .replace(/[()（）\[\]【】"'`,.・･:：;；\/／\-ー－_]/g, '')
+    .toLowerCase();
+}
+
+/** レシートの表記から食材を探す。品名 → 表記ゆれ → ならした形 の順 */
 function normalizeFoodName(raw) {
   var s = String(raw || '').trim();
-  for (var i = 0; i < S.foods.length; i++) {
-    var f = S.foods[i];
-    if (f.name === s) return f;
-    var al = (f.aliases || '').split(/[,、]/).map(function (x) { return x.trim(); }).filter(Boolean);
-    if (al.indexOf(s) >= 0) return f;
+  if (!s) return null;
+  var key = normalizeName(s), i, j, f, al;
+
+  for (i = 0; i < S.foods.length; i++) if (S.foods[i].name === s) return S.foods[i];
+  for (i = 0; i < S.foods.length; i++) {
+    al = (S.foods[i].aliases || '').split(/[,、]/);
+    for (j = 0; j < al.length; j++) if (al[j].trim() === s) return S.foods[i];
+  }
+  for (i = 0; i < S.foods.length; i++) {
+    f = S.foods[i];
+    if (normalizeName(f.name) === key) return f;
+    al = (f.aliases || '').split(/[,、]/);
+    for (j = 0; j < al.length; j++) if (al[j].trim() && normalizeName(al[j]) === key) return f;
+  }
+  // 片方がもう片方を含む場合（「豚こま」と「豚こま切落とし」など）。短すぎる語では効かせない
+  if (key.length >= 3) {
+    for (i = 0; i < S.foods.length; i++) {
+      var nk = normalizeName(S.foods[i].name);
+      if (nk.length >= 3 && (nk.indexOf(key) >= 0 || key.indexOf(nk) >= 0)) return S.foods[i];
+    }
   }
   return null;
 }
-function applyReceiptDraft(items) {
-  S.receiptDraft = (items || []).map(function (it) {
-    var f = normalizeFoodName(it.name);
-    return { raw: it.name, foodId: f ? f.id : null, name: f ? f.name : it.name,
-             unit: f ? f.unit : 'g', qty: f ? f.lastQty : null,
-             yen: it.yen, date: it.date || todayStr(), source: 'レシート読取' };
+
+/** 送る前に縮める。iPhoneの写真はそのままだと重すぎる */
+function shrinkImage(file, maxSide) {
+  return new Promise(function (res, rej) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      var w = img.naturalWidth, h = img.naturalHeight;
+      var sc = Math.min(1, maxSide / Math.max(w, h));
+      var cv = document.createElement('canvas');
+      cv.width = Math.round(w * sc); cv.height = Math.round(h * sc);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      res(cv.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); rej(new Error('画像を開けませんでした')); };
+    img.src = url;
   });
-  return S.receiptDraft;
+}
+
+function ocrBusyHtml() {
+  var b = S.ocrBusy, pct = b.total ? Math.round(b.done / b.total * 100) : 0;
+  return '<div class="panel" style="padding:18px">' +
+    '<div style="font-size:15px;font-weight:800">レシートを読んでいます</div>' +
+    '<div class="small muted" style="margin-top:6px">' + b.total + '枚のうち ' + (b.done + 1) + '枚目' +
+      (b.err ? '　<span style="color:var(--danger)">' + esc(b.err) + '</span>' : '') + '</div>' +
+    '<div class="prog"><i style="width:' + pct + '%"></i></div>' +
+    '<p class="tiny muted" style="margin:14px 0 0;line-height:1.8">1枚あたり10秒ほどかかります。' +
+    'この画面のままお待ちください。写真は保存されません。</p></div>';
+}
+
+/** 写真を選ばせて、順に読む */
+function pickReceipts() {
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.onchange = function () {
+    var files = [].slice.call(inp.files || []);
+    document.body.removeChild(inp);
+    if (files.length) runOcr(files);
+  };
+  inp.click();
+}
+
+function runOcr(files) {
+  S.ocrBusy = { done: 0, total: files.length, err: '' };
+  renderBuy();
+
+  var rows = [], failed = 0, lastErr = '';
+
+  var step = function (i) {
+    if (i >= files.length) return Promise.resolve();
+    S.ocrBusy.done = i; renderBuy();
+    return shrinkImage(files[i], 1600)
+      .then(function (dataUrl) { return call('readReceipt', { image: dataUrl, mime: 'image/jpeg' }); })
+      .then(function (r) {
+        if (!r || !r.ok) { failed++; lastErr = (r && r.error) || '読み取れませんでした'; return; }
+        var rc = r.receipt || {};
+        rc.items.forEach(function (it) { rows.push(draftRow(it, rc)); });
+      })
+      .catch(function (e) { failed++; lastErr = (e && e.message) || '読み取れませんでした'; })
+      .then(function () { return step(i + 1); });
+  };
+
+  step(0).then(function () {
+    S.ocrBusy = null;
+    if (!rows.length) {
+      renderBuy();
+      return toastErr(failed ? lastErr : 'レシートから品物を読み取れませんでした');
+    }
+    S.draft = { rows: rows, sheets: files.length, failed: failed };
+    renderBuy();
+    window.scrollTo(0, 0);
+    if (failed) toastErr(failed + '枚は読み取れませんでした：' + lastErr);
+    else toast(rows.length + '件読み取りました。内容量を入れてください');
+  });
+}
+
+var DRAFT_SEQ = 0;
+function draftRow(it, rc) {
+  var f = normalizeFoodName(it.name);
+  var unit = it.unit && S.units.indexOf(it.unit) >= 0 ? it.unit : '';
+  return {
+    key: 'd' + (++DRAFT_SEQ),
+    raw: String(it.name || ''),
+    foodId: f ? f.id : null,
+    name: f ? f.name : String(it.name || ''),
+    category: f ? f.category : (S.categories[0] || '冷蔵'),
+    unit: f ? f.unit : (unit || 'g'),
+    qty: it.qty > 0 ? it.qty : (f && f.lastQty ? f.lastQty : ''),
+    qtyFrom: it.qty > 0 ? 'レシート' : (f && f.lastQty ? '前回値' : ''),
+    yen: it.yen,
+    date: rc.date || todayStr(),
+    store: rc.store || '',
+    keep: true,
+  };
+}
+
+function draftHtml() {
+  var d = S.draft;
+  var ready = d.rows.filter(function (r) { return r.keep && r.qty > 0; }).length;
+  var kept  = d.rows.filter(function (r) { return r.keep; }).length;
+
+  // 日付ごとにまとめる。過去レシートを何枚も投げたときに効く
+  var byDate = {}, order = [];
+  d.rows.forEach(function (r) {
+    if (!byDate[r.date]) { byDate[r.date] = []; order.push(r.date); }
+    byDate[r.date].push(r);
+  });
+  order.sort();
+
+  var head =
+    '<div class="dbar"><div class="in">' +
+      '<b>レシート' + d.sheets + '枚から ' + d.rows.length + '件</b>' +
+      '<button class="lnk" id="dCancel">やめる</button>' +
+    '</div></div>';
+
+  var body = order.map(function (date) {
+    var store = (byDate[date][0] || {}).store || '';
+    return '<div class="dhd"><b>' + esc(fmtReceiptDate(date)) + '</b>' +
+             (store ? '<span class="tiny muted">' + esc(store) + '</span>' : '') +
+             '<div class="rule"></div>' +
+             '<button class="lnk" data-ddate="' + esc(date) + '">日付を直す</button></div>' +
+           byDate[date].map(draftRowHtml).join('');
+  }).join('');
+
+  return head + body +
+    '<div style="height:14px"></div>' +
+    '<button class="btn" id="dGo"' + (ready ? '' : ' disabled') + '>' +
+      (ready ? ready + '件を登録する' : '内容量を入れてください') + '</button>' +
+    (ready < kept
+      ? '<p class="tiny muted" style="margin:10px 2px 0;text-align:center">内容量が空の ' + (kept - ready) +
+        '件は登録されません。あとから仕入タブで足せます。</p>'
+      : '') +
+    '<div style="height:10px"></div>' +
+    '<p class="tiny muted" style="margin:0 2px;line-height:1.8">登録した行の由来は「レシート読取」になります。' +
+    '手入力ぶんとは仕入シートで見分けられます。</p>';
+}
+
+function draftRowHtml(r) {
+  var isNew = !r.foodId;
+  var cls = 'drow' + (r.keep ? '' : ' off') + (isNew && r.keep ? ' new' : '');
+  var sub = isNew
+    ? '<span class="tagnew">新しい食材</span>　品名をタップすると既存の食材に結べます'
+    : (normalizeName(r.raw) === normalizeName(r.name)
+        ? esc(r.category)
+        : '<span class="hit">' + esc(r.raw) + '</span> として印字　' + esc(r.category));
+
+  var opts = function (list, cur) {
+    return list.map(function (x) {
+      return '<option value="' + esc(x) + '"' + (x === cur ? ' selected' : '') + '>' + esc(x) + '</option>';
+    }).join('');
+  };
+
+  return '<div class="' + cls + '" data-drow="' + r.key + '">' +
+    '<div class="t"><b data-dpick="' + r.key + '">' + esc(isNew ? r.raw : r.name) + '</b>' +
+      '<span class="y">' + yen(r.yen) + '</span>' +
+      '<button class="x" data-dtoggle="' + r.key + '">' + (r.keep ? '除外' : '戻す') + '</button></div>' +
+    '<div class="m">' + sub + (r.qtyFrom ? '　<span class="muted">内容量: ' + r.qtyFrom + '</span>' : '') + '</div>' +
+    (r.keep
+      ? '<div class="f">' +
+          '<label class="inw"><input data-dqty="' + r.key + '" inputmode="decimal" placeholder="内容量" value="' +
+            esc(String(r.qty === '' || r.qty == null ? '' : r.qty)) + '"><i>' + esc(r.unit) + '</i></label>' +
+          '<label class="inw"><input data-dyen="' + r.key + '" inputmode="decimal" value="' + esc(String(r.yen)) + '"><i>円</i></label>' +
+          (isNew ? '<select data-dunit="' + r.key + '">' + opts(S.units, r.unit) + '</select>' : '') +
+        '</div>' +
+        (isNew ? '<div class="f"><select data-dcat="' + r.key + '">' + opts(S.categories, r.category) + '</select></div>' : '')
+      : '') +
+    '</div>';
+}
+
+function draftRowByKey(k) {
+  var rs = (S.draft || {}).rows || [];
+  for (var i = 0; i < rs.length; i++) if (rs[i].key === k) return rs[i];
+  return null;
+}
+
+function bindDraft() {
+  var rb = $('#bReceipt');
+  if (rb) rb.onclick = pickReceipts;
+  var ro = $('#bReceiptOff');
+  if (ro) ro.onclick = function () {
+    toast('設定でAPIキーを入れてください');
+    showSettings();
+  };
+  if (!S.draft) return;
+
+  var c = $('#dCancel');
+  if (c) c.onclick = function () {
+    if (!confirm('読み取った ' + S.draft.rows.length + '件を捨てますか？')) return;
+    S.draft = null; renderBuy();
+  };
+
+  var view = $('#v-buy');
+  view.querySelectorAll('[data-dtoggle]').forEach(function (b) {
+    b.onclick = function () {
+      var r = draftRowByKey(b.dataset.dtoggle); if (!r) return;
+      r.keep = !r.keep; renderBuy();
+    };
+  });
+  view.querySelectorAll('[data-ddate]').forEach(function (b) {
+    b.onclick = function () { editDraftDate(b.dataset.ddate); };
+  });
+  view.querySelectorAll('[data-dpick]').forEach(function (b) {
+    b.onclick = function () { showDraftPick(b.dataset.dpick); };
+  });
+
+  var num = function (attr, field) {
+    view.querySelectorAll('[data-' + attr + ']').forEach(function (inp) {
+      inp.oninput = function () {
+        var r = draftRowByKey(inp.dataset[attr]); if (!r) return;
+        var v = parseFloat(inp.value);
+        r[field] = isNaN(v) ? '' : v;
+        paintDraftGo();
+      };
+    });
+  };
+  num('dqty', 'qty');
+  num('dyen', 'yen');
+
+  view.querySelectorAll('[data-dunit]').forEach(function (sel) {
+    sel.onchange = function () {
+      var r = draftRowByKey(sel.dataset.dunit); if (!r) return;
+      r.unit = sel.value; renderBuy();
+    };
+  });
+  view.querySelectorAll('[data-dcat]').forEach(function (sel) {
+    sel.onchange = function () {
+      var r = draftRowByKey(sel.dataset.dcat); if (!r) return;
+      r.category = sel.value;
+    };
+  });
+
+  var go = $('#dGo');
+  if (go) go.onclick = submitDraft;
+}
+
+/** 「◯件を登録する」の出方だけを更新する。入力のたびに描き直すと打ちにくいので */
+function paintDraftGo() {
+  var go = $('#dGo'); if (!go || !S.draft) return;
+  var ready = S.draft.rows.filter(function (r) { return r.keep && r.qty > 0; }).length;
+  go.disabled = !ready;
+  go.textContent = ready ? ready + '件を登録する' : '内容量を入れてください';
+}
+
+/**
+ * 「この行はどの食材？」
+ * ここで既存の食材を選ぶと、レシートの表記が表記ゆれとして覚えられ、
+ * 次から同じ表記が自動で当たるようになる。使うほど手数が減る。
+ */
+function showDraftPick(key, q) {
+  var r = draftRowByKey(key); if (!r) return;
+  var query = String(q == null ? '' : q).trim();
+
+  var list = S.foods.filter(function (f) { return f.category !== '作り置き'; });
+  if (query) {
+    list = list.filter(function (f) {
+      return f.name.indexOf(query) >= 0 || (f.aliases || '').indexOf(query) >= 0 ||
+             normalizeName(f.name).indexOf(normalizeName(query)) >= 0;
+    });
+  }
+  list.sort(function (a, b) {
+    var x = a.lastBuy || '', y = b.lastBuy || '';
+    if (x !== y) return x > y ? -1 : 1;
+    return String(a.name).localeCompare(String(b.name), 'ja');
+  });
+  list = list.slice(0, 40);
+
+  openSheet(
+    '<h3>どの食材ですか</h3>' +
+    '<p class="small muted" style="margin:-8px 0 14px;line-height:1.8">レシートの表記は' +
+      '<b>' + esc(r.raw) + '</b>。' +
+      '既存の食材を選ぶと、この表記を覚えて次から自動で当たるようになります。</p>' +
+    '<label class="fld"><div class="inw wide"><input id="dpQ" type="search" placeholder="絞り込み" value="' +
+      esc(query) + '" autocapitalize="off"></div></label>' +
+    (list.length
+      ? '<div class="rows" id="dpRows">' + list.map(function (x) {
+          return '<button class="prow' + (x.id === r.foodId ? ' on' : '') + '" data-dpf="' + esc(x.id) + '">' +
+            '<span class="dot" style="background:' + catColor(x.category) + '"></span>' +
+            '<span class="g"><b>' + esc(x.name) + '</b><span>' + esc(x.category) +
+              (x.aliases ? '　' + esc(x.aliases) : '') + '</span></span>' +
+            '<span class="r">' + esc(x.unit) + '</span></button>';
+        }).join('') + '</div>'
+      : '<div class="empty">見つかりません</div>') +
+    '<div style="height:12px"></div>' +
+    '<button class="btn quiet" id="dpNew">「' + esc(r.raw) + '」を新しい食材にする</button>'
+  );
+
+  var qi = $('#dpQ');
+  qi.oninput = function () {
+    var v = this.value;
+    showDraftPick(key, v);
+    var n = $('#dpQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length);
+  };
+  var rows = $('#dpRows');
+  if (rows) rows.onclick = function (e) {
+    var b = e.target.closest('[data-dpf]'); if (!b) return;
+    var f = foodById(b.dataset.dpf); if (!f) return;
+    r.foodId = f.id; r.name = f.name; r.unit = f.unit; r.category = f.category;
+    if (!(r.qty > 0) && f.lastQty) { r.qty = f.lastQty; r.qtyFrom = '前回値'; }
+    closeSheet(); renderBuy();
+  };
+  $('#dpNew').onclick = function () {
+    r.foodId = null; r.name = r.raw;
+    r.category = S.categories[0] || '冷蔵';
+    closeSheet(); renderBuy();
+  };
+}
+
+function editDraftDate(date) {
+  openSheet('<h3>購入日を直す</h3>' +
+    '<p class="small muted" style="margin:-8px 0 14px;line-height:1.8">' + esc(fmtReceiptDate(date)) +
+    ' の行をまとめて動かします。</p>' +
+    '<input type="date" id="ddNew" value="' + esc(date) + '">' +
+    '<div style="height:14px"></div><button class="btn" id="ddGo">この日にする</button>');
+  $('#ddGo').onclick = function () {
+    var v = $('#ddNew').value;
+    if (!v) return;
+    S.draft.rows.forEach(function (r) { if (r.date === date) r.date = v; });
+    closeSheet(); renderBuy();
+  };
+}
+
+function submitDraft() {
+  var rows = S.draft.rows.filter(function (r) { return r.keep && r.qty > 0 && r.yen >= 0; });
+  if (!rows.length) return toastErr('登録できる行がありません');
+
+  $('#dGo').disabled = true;
+  $('#dGo').textContent = '登録しています…';
+
+  // 知らない品名は先に食材として作る。作った結果は他の行にも効かせる
+  var news = rows.filter(function (r) { return !r.foodId; });
+  var made = {};
+
+  var makeNext = function (i) {
+    if (i >= news.length) return Promise.resolve();
+    var r = news[i];
+    var k = normalizeName(r.raw);
+    if (made[k]) { r.foodId = made[k]; return makeNext(i + 1); }
+    return call('addFood', { name: r.raw, category: r.category, unit: r.unit, tracked: true }, opId())
+      .then(function (res) {
+        if (!res || !res.ok) throw new Error((res && res.error) || (r.raw + ' を登録できませんでした'));
+        made[k] = res.food.id;
+        r.foodId = res.food.id;
+        if (!foodById(res.food.id)) S.foods.push(res.food);
+        return makeNext(i + 1);
+      });
+  };
+
+  makeNext(0).then(function () {
+    var items = rows.map(function (r) {
+      var f = foodById(r.foodId);
+      return {
+        foodId: r.foodId, qty: r.qty, yen: r.yen, unit: r.unit, date: r.date,
+        source: 'レシート読取',
+        // レシートの表記が自分の呼び方と違うときだけ、表記ゆれとして覚えてもらう
+        alias: (f && normalizeName(f.name) !== normalizeName(r.raw)) ? r.raw : '',
+      };
+    });
+    return call('addLots', { items: items }, opId());
+  }).then(function (res) {
+    if (!res || !res.ok) throw new Error((res && res.error) || '登録できませんでした');
+    var n = rows.length;
+    var left = S.draft.rows.filter(function (r) { return r.keep && !(r.qty > 0); });
+    S.draft = left.length ? { rows: left, sheets: S.draft.sheets, failed: 0 } : null;
+    return refresh(true).then(function () {
+      renderBuy();
+      toast(n + '件を登録しました' + (left.length ? '（内容量が空の' + left.length + '件は残しました）' : ''));
+    });
+  }).catch(function (e) {
+    paintDraftGo();
+    toastErr((e && e.message) || '登録できませんでした');
+  });
 }
 
 /* ============================================================================
