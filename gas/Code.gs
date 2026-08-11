@@ -111,11 +111,23 @@ function setup() {
     props.setProperty('APP_TOKEN', token);
   }
 
+  // レシート読取は外部に通信する。ここで一度呼んでおくと、
+  // 必要な権限（script.external_request）の同意画面がこのタイミングで出る。
+  // 承認が済んでいないと、アプリ側から読み取ろうとしたときだけ失敗して分かりにくい。
+  let net = '';
+  try {
+    UrlFetchApp.fetch('https://generativelanguage.googleapis.com/', { muteHttpExceptions: true });
+    net = '外部通信の権限: OK';
+  } catch (e) {
+    net = '外部通信の権限: まだです（レシート読取だけ使えません）→ ' + (e && e.message ? e.message : e);
+  }
+
   const msg = [
     '',
     '=== セットアップ完了 ===',
     'スプレッドシート: ' + ss_().getName(),
     changed.length ? '列構成を移行したシート: ' + changed.join(' / ') : '列構成の移行は不要でした',
+    net,
     '',
     'APIトークン（アプリの設定画面に貼る）:',
     '  ' + token,
@@ -946,7 +958,15 @@ function apiReadReceipt_(p) {
   try { raw = JSON.parse(text); } catch (e) { return { ok: false, error: '読み取り結果を解釈できませんでした' }; }
 
   const jsonText = pickOcrText_(raw);
-  if (!jsonText) return { ok: false, error: '読み取り結果が空でした', shape: Object.keys(raw || {}).join(',') };
+  if (!jsonText) {
+    return {
+      ok: false,
+      error: '読み取り結果が空でした',
+      shape: Object.keys(raw || {}).join(','),
+      status: String((raw && raw.status) || ''),
+      sample: text.slice(0, 1200),   // 何が返ってきたのか後から追えるように
+    };
+  }
 
   let out;
   try { out = JSON.parse(jsonText); }
@@ -956,24 +976,40 @@ function apiReadReceipt_(p) {
 }
 
 /**
- * 応答の入れ物の名前が変わっても本文を拾えるようにしておく。
- * 送った側の文面を拾わないよう、出力側の入れ物だけを見る。
+ * 応答のどこに本文が入っていても拾えるようにする。
+ * 入れ物の名前（output / steps / candidates …）は変わりうるので、
+ * 名前で探さず「JSONとして読めて、欲しい形をしている文字列」を探す。
  */
 function pickOcrText_(raw) {
   if (!raw) return '';
-  if (typeof raw.output_text === 'string' && raw.output_text) return raw.output_text;
-  const buf = [];
-  function walk(v, d) {
-    if (!v || d > 6) return;
+  if (typeof raw.output_text === 'string' && looksLikeReceipt_(raw.output_text)) return raw.output_text;
+
+  const strings = [];
+  (function walk(v, d) {
+    if (v == null || d > 12) return;
+    if (typeof v === 'string') { if (v.indexOf('{') >= 0) strings.push(v); return; }
     if (Array.isArray(v)) { v.forEach(function (x) { walk(x, d + 1); }); return; }
-    if (typeof v !== 'object') return;
-    if (typeof v.output_text === 'string') buf.push(v.output_text);
-    if (typeof v.text === 'string') buf.push(v.text);
-    ['content', 'parts', 'output', 'outputs', 'message', 'delta', 'candidates'].forEach(function (k) { walk(v[k], d + 1); });
+    if (typeof v === 'object') { Object.keys(v).forEach(function (k) { walk(v[k], d + 1); }); }
+  })(raw, 0);
+
+  for (let i = 0; i < strings.length; i++) {
+    if (looksLikeReceipt_(strings[i])) return strings[i];
   }
-  ['output', 'outputs', 'candidates', 'content', 'response', 'result', 'message'].forEach(function (k) { walk(raw[k], 0); });
-  const hit = buf.filter(function (s) { return s && s.indexOf('{') >= 0; })[0];
-  return hit || buf[0] || '';
+  // ```json ... ``` のように囲まれている場合
+  for (let i = 0; i < strings.length; i++) {
+    const m = strings[i].match(/\{[\s\S]*\}/);
+    if (m && looksLikeReceipt_(m[0])) return m[0];
+  }
+  return '';
+}
+
+/** レシートの読み取り結果として辻褄が合う文字列か */
+function looksLikeReceipt_(s) {
+  if (!s || s.indexOf('{') < 0) return false;
+  try {
+    const o = JSON.parse(s);
+    return !!(o && (Array.isArray(o.items) || typeof o.date === 'string'));
+  } catch (e) { return false; }
 }
 
 /** 数値や日付の形をそろえ、品物でない行を落とす */
