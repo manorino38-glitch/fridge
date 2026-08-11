@@ -163,6 +163,25 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .chart .read{display:flex;justify-content:space-between;font-size:11px;color:var(--ink-2);margin-top:9px;
   border-top:1px solid var(--line);padding-top:9px;font-variant-numeric:tabular-nums}
 
+/* ---------- 今日 ---------- */
+.dayhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:11px}
+.dayhead .t{font-size:12px;font-weight:800;letter-spacing:.08em;color:var(--ink-2)}
+.dayhead .v{font-size:27px;font-weight:800;letter-spacing:-.02em}
+.mealrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border-radius:11px;overflow:hidden}
+.mealrow div{background:var(--surface-2);padding:9px 4px;text-align:center}
+.mealrow .k{font-size:10px;font-weight:800;color:var(--ink-2)}
+.mealrow .v{font-size:14px;font-weight:800;margin-top:2px}
+.mealrow div.z .v{color:var(--ink-3);font-weight:600}
+.it{display:grid;grid-template-columns:40px 1fr auto;gap:9px;align-items:baseline;padding:10px 0;border-top:1px solid var(--line)}
+.it .tm{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.it .g{min-width:0}
+.it .g b{font-size:14px;font-weight:700}
+.it .g span{font-size:11px;color:var(--ink-3);margin-left:6px;font-variant-numeric:tabular-nums}
+.it .amt{font-size:14px;font-weight:800;white-space:nowrap;font-variant-numeric:tabular-nums}
+.it.off{opacity:.5}
+.it .tag{display:inline-block;font-size:10px;font-weight:800;padding:1px 7px;border-radius:999px;
+  background:var(--tint);color:var(--ink-2);margin-left:6px;vertical-align:1px}
+
 /* ---------- 冷蔵庫 ---------- */
 .ftop{position:sticky;top:0;z-index:20;background:var(--bg);padding:0 0 12px;margin-top:-2px}
 .mealseg{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;background:var(--tint);border-radius:14px;padding:5px}
@@ -253,6 +272,8 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
   display:none;align-items:center;gap:12px;background:#23221d;color:#fff;border-radius:13px;
   padding:13px 15px;font-size:14px;box-shadow:0 8px 26px rgba(0,0,0,.24)}
 #toast.on{display:flex}
+#toast.err{background:#7d2318}
+#toast.err button{color:#ffc9bf}
 #toast .msg{flex:1}
 #toast button{color:#7fdcb4;font-weight:800;font-size:14px;padding:4px 2px}
 #banner{position:fixed;left:0;right:0;top:0;z-index:50;background:var(--warn);color:#fff;
@@ -279,6 +300,13 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
   <div style="height:8px"></div>
   <button class="btn" id="bSave">接続する</button>
   <p id="setupErr" style="color:var(--danger);margin-top:16px"></p>
+  <div id="setupWarn" hidden style="margin-top:18px;padding:13px 14px;border-radius:12px;background:var(--warn-tint);border:1px solid var(--warn)">
+    <p style="margin:0;font-size:13px;color:var(--warn);line-height:1.8">
+      <b>この端末では設定を保存できません。</b><br>
+      設定 → アプリ → Safari → 詳細 →「すべてのCookieをブロック」がオンになっていないか確認してください。<br>
+      オフにできない場合も、接続したあとに出る「ホーム画面用リンク」を使えば、毎回入力せずに済みます。
+    </p>
+  </div>
 </div>
 
 <div id="app" hidden>
@@ -309,10 +337,56 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
  * ==========================================================================*/
 var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.run) ? true : false;
 
-var CFG = (function () {
-  try { return JSON.parse(localStorage.getItem('fridge.cfg') || '{}'); } catch (e) { return {}; }
+/* この版の番号。version.txt と必ず同じ文字列にすること。
+   ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
+var APP_VERSION = '2026-08-11b';
+
+/* ---- 設定の保存先 --------------------------------------------------------
+ * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
+ * 保存できないと毎回そこで詰まるので、
+ *   1. URLの # に載せた設定（ホーム画面のアイコンが持ち続ける）
+ *   2. localStorage
+ * の順で読む。1があれば、保存が一切できない端末でも起動するだけで使える。
+ * ------------------------------------------------------------------------*/
+var STORAGE_OK = (function () {
+  try { localStorage.setItem('fridge.probe', '1'); localStorage.removeItem('fridge.probe'); return true; }
+  catch (e) { return false; }
 })();
-function saveCfg() { try { localStorage.setItem('fridge.cfg', JSON.stringify(CFG)); } catch (e) {} }
+
+function b64enc(str) { return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function b64dec(str) {
+  var t = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (t.length % 4) t += '=';
+  return decodeURIComponent(escape(atob(t)));
+}
+
+function cfgFromHash() {
+  var m = (location.hash || '').match(/[#&]s=([^&]+)/);
+  if (!m) return null;
+  try {
+    var o = JSON.parse(b64dec(m[1]));
+    return (o && o.t) ? o : null;
+  } catch (e) { return null; }
+}
+
+/** ホーム画面に登録するためのリンク。これ自体が設定を持つ */
+function cfgLink() {
+  var base = location.origin + location.pathname;
+  return base + '#s=' + b64enc(JSON.stringify({ u: CFG.url || '', t: CFG.token || '' }));
+}
+
+var CFG = (function () {
+  var stored = {};
+  try { stored = JSON.parse(localStorage.getItem('fridge.cfg') || '{}'); } catch (e) {}
+  var fromHash = cfgFromHash();
+  // # に設定があればそちらを優先する（保存が効かない端末でも毎回ここから復元できる）
+  return fromHash ? { url: fromHash.u || stored.url, token: fromHash.t } : stored;
+})();
+
+function saveCfg() {
+  try { localStorage.setItem('fridge.cfg', JSON.stringify(CFG)); return true; }
+  catch (e) { return false; }
+}
 
 function call(action, payload, opId) {
   var req = { action: action, token: CFG.token || '', payload: payload || {}, opId: opId || null };
@@ -357,13 +431,55 @@ function paintBanner() {
   b.textContent = n ? '未送信 ' + n + ' 件（通信できたら自動で送ります）' : '';
 }
 
+/* ---- 版の入れ替え -------------------------------------------------------
+ * iOSのホーム画面アプリは、更新してもいつまでも古いページを抱えていることがある。
+ * 実際に配信されている version.txt と手元の版がずれていたら、
+ * キャッシュとサービスワーカーを捨てて読み直す。
+ * ------------------------------------------------------------------------*/
+function hardReload() {
+  var done = function () { location.reload(); };
+  var jobs = [];
+  if (window.caches) {
+    jobs.push(caches.keys().then(function (ks) {
+      return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+    }));
+  }
+  if (navigator.serviceWorker) {
+    jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+      return Promise.all(rs.map(function (r) { return r.unregister(); }));
+    }));
+  }
+  Promise.all(jobs).then(done, done);
+}
+
+var lastVerCheck = 0;
+function checkVersion(force) {
+  if (IS_GAS) return;
+  var now = Date.now();
+  if (!force && now - lastVerCheck < 5 * 60 * 1000) return;
+  lastVerCheck = now;
+  fetch('version.txt?_=' + now, { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.text() : null; })
+    .then(function (t) {
+      if (!t) return;
+      t = t.trim();
+      if (!t || t === APP_VERSION) return;
+      var seen = null;
+      try { seen = sessionStorage.getItem('fridge.reloadedTo'); } catch (e) {}
+      if (seen === t) return;                       // 入れ替えたのにまだずれる＝無限ループ防止
+      try { sessionStorage.setItem('fridge.reloadedTo', t); } catch (e) {}
+      hardReload();
+    })
+    .catch(function () {});
+}
+
 /* ============================================================================
  * 状態
  * ==========================================================================*/
 var S = {
   tab: 'fridge',
   categories: [], foods: [], lots: [], meals: ['朝','昼','夕','間食'], outKinds: [], units: ['g','ml','個','本','枚'],
-  summary: null, serverDate: '', ym: '',
+  summary: null, day: null, serverDate: '', ym: '',
   meal: '夕', mealTouched: false,
   ent: {}, kind: {}, sel: {}, open: null,
   makePrep: false,
@@ -430,8 +546,10 @@ function catColor(cat) {
  * トースト / モーダル
  * ==========================================================================*/
 var toastTimer = null;
-function toast(msg, actionLabel, onAction, ms) {
+function toastErr(msg) { toast(msg, null, null, 7000, true); }
+function toast(msg, actionLabel, onAction, ms, isErr) {
   var el = document.getElementById('toast');
+  el.classList.toggle('err', !!isErr);
   $('.msg', el).textContent = msg;
   var btn = document.getElementById('toastAct');
   if (actionLabel) { btn.textContent = actionLabel; btn.hidden = false; btn.onclick = function () { hideToast(); onAction(); }; }
@@ -454,8 +572,11 @@ document.getElementById('sheet').addEventListener('click', function (e) { if (e.
  * ==========================================================================*/
 function boot() {
   paintBanner();
+  checkVersion(true);
   $('#fUrl').hidden = IS_GAS;
   if (!CFG.token || (!IS_GAS && !CFG.url)) return showSetup();
+  // # から復元できたときは、保存が効く端末なら控えておく
+  saveCfg();
   loadAll();
 }
 
@@ -464,14 +585,33 @@ function showSetup(err) {
   $('#iUrl').value = CFG.url || '';
   $('#iTok').value = CFG.token || '';
   $('#setupErr').textContent = err || '';
+  $('#setupWarn').hidden = STORAGE_OK;
 }
 
 $('#bSave').addEventListener('click', function () {
-  CFG.url = $('#iUrl').value.trim();
-  CFG.token = $('#iTok').value.trim();
+  var raw = $('#iUrl').value.trim();
+
+  // 設定リンク（#s=...）をそのまま貼られた場合は、そこから読み取る
+  var m = raw.match(/[#&]s=([^&\s]+)/);
+  if (m) {
+    try {
+      var o = JSON.parse(b64dec(m[1]));
+      if (o && o.t) { CFG.url = o.u || ''; CFG.token = o.t; }
+    } catch (e) {}
+  } else {
+    CFG.url = raw;
+    CFG.token = $('#iTok').value.trim();
+  }
+
   if (!CFG.token) return ($('#setupErr').textContent = 'トークンを入れてください');
   if (!IS_GAS && !/\/exec\s*$/.test(CFG.url)) return ($('#setupErr').textContent = 'URLは /exec で終わるものを貼ってください');
+
   saveCfg();
+  // 端末に消されにくくするようOSに申請する（対応していない端末では何も起きない）
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+  // 以後この端末では、保存が効かなくてもURLから復元できるようにしておく
+  try { history.replaceState(null, '', cfgLink()); } catch (e) {}
+
   $('#setup').hidden = true; $('#boot').hidden = false;
   loadAll();
 });
@@ -505,6 +645,7 @@ function applyBootstrap(r) {
   S.outKinds = r.outKinds || [];
   S.units = r.units || S.units;
   S.summary = r.summary;
+  if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
 }
 
@@ -601,15 +742,18 @@ function renderSummary() {
       '<div class="sub num">1日平均 ' + yen(s.perDay) + '<span class="tiny" style="color:var(--ink-3)">（' + s.days + '日）</span></div>' +
     '</div>' +
 
-    '<div class="tiles">' +
+
+    todayHtml() +
+
+    '<div class="sect"><h2>今月の内訳</h2><div class="rule"></div></div>' +
+    '<div class="tiles" style="margin-bottom:10px">' +
       ['朝', '昼', '夕', '間食'].map(function (k) {
         var v = mp[k] || 0;
-        return '<div class="tile"><div class="k">' + k + '</div><div class="v num">' + yen(v) + '</div>' +
+        return '<div class="tile"><div class="k">' + k + '<span class="tiny" style="font-weight:600;color:var(--ink-3)"> 1日平均</span></div>' +
+               '<div class="v num">' + yen(v) + '</div>' +
                '<div class="bar"><i style="width:' + Math.round(v / mx * 100) + '%"></i></div></div>';
       }).join('') +
     '</div>' +
-
-    '<div class="sect"><h2>内訳</h2><div class="rule"></div></div>' +
     '<div class="panel">' +
       '<div class="kv"><span class="k">自炊</span><span class="v num">' + yen(s.homeCook) + '</span></div>' +
       '<div class="kv"><span class="k">外食</span><span class="v num">' + yen(s.eatOut) +
@@ -628,6 +772,49 @@ function renderSummary() {
     '</div>';
 
   paintDayRead();
+}
+
+/**
+ * 今日ぶんの明細。
+ * 「登録できたのか分からない」を無くすのが目的なので、
+ * 記録した行をそのまま時刻順に並べる。廃棄と作り置きへの振替も、
+ * 食費には入れないが薄く出す（記録された事実は見せる）。
+ */
+function todayHtml() {
+  if (S.ym !== todayStr().slice(0, 7)) return '';
+  var d = S.day;
+  var m = (d && d.meals) || { '朝': 0, '昼': 0, '夕': 0, '間食': 0 };
+
+  var tiles = ['朝', '昼', '夕', '間食'].map(function (k) {
+    var v = m[k] || 0;
+    return '<div' + (v ? '' : ' class="z"') + '><div class="k">' + k + '</div><div class="v num">' + yen(v) + '</div></div>';
+  }).join('');
+
+  var list;
+  if (!d || !d.items || !d.items.length) {
+    list = '<div class="empty" style="padding:26px 10px">まだ今日の記録はありません</div>';
+  } else {
+    list = d.items.map(function (x) {
+      var qty = x.qty ? '<span>' + esc(fmtQty(x.qty, x.unit)) + '</span>' : '';
+      var tag = '';
+      if (!x.counted) tag = '<span class="tag">' + esc(x.kind === '作り置きへ振替' ? '作り置きへ' : x.kind) + '</span>';
+      else if (x.from === '在庫外') tag = '<span class="tag">' + esc(x.kind) + '</span>';
+      return '<div class="it' + (x.counted ? '' : ' off') + '">' +
+        '<span class="tm">' + esc(x.time || '') + '</span>' +
+        '<span class="g"><b>' + esc(x.name) + '</b>' + qty + tag +
+          (x.meal ? '<span>' + esc(x.meal) + '</span>' : '') + '</span>' +
+        '<span class="amt">' + (x.counted ? yen(x.yen) : '<span style="color:var(--ink-3)">—</span>') + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  return '<div class="sect"><h2>今日</h2><div class="rule"></div>' +
+           '<span class="hint num">' + fmtMD(todayStr()) + '</span></div>' +
+         '<div class="panel" style="padding:14px">' +
+           '<div class="dayhead"><span class="t">今日の食費</span><span class="v num">' + yen(d ? d.total : 0) + '</span></div>' +
+           '<div class="mealrow">' + tiles + '</div>' +
+           list +
+         '</div>';
 }
 
 /** 日別の棒。1系列なので凡例は不要。タップでその日の内訳を出す */
@@ -706,11 +893,35 @@ function showSettings() {
       '<div class="inw wide"><input id="sUnits" value="' + esc(S.units.join(',')) + '"></div></label>' +
     '<div style="height:6px"></div>' +
     '<button class="btn" id="sSave">保存</button>' +
+    '<div class="sect"><h2>接続</h2><div class="rule"></div></div>' +
+    '<div class="panel">' +
+      '<div class="kv"><span class="k">保存できる端末か</span><span class="v">' + (STORAGE_OK ? 'はい' : '<span style="color:var(--danger)">いいえ</span>') + '</span></div>' +
+      '<div class="kv"><span class="k">この版</span><span class="v num">' + esc(APP_VERSION) + '</span></div>' +
+      '<div class="kv"><span class="k">トークン</span><span class="v"><button class="lnk" id="sShowTok">表示</button></span></div>' +
+    '</div>' +
+    '<div style="height:10px"></div>' +
+    '<button class="btn line" id="sLink">ホーム画面用リンクをコピー</button>' +
+    '<p class="tiny muted" style="margin:8px 2px 0;line-height:1.8">このリンクをSafariで開いて「ホーム画面に追加」しておくと、' +
+    '端末が設定を忘れても毎回入力せずに済みます。<b>リンクの中にトークンが入っているので、人には送らないでください。</b></p>' +
+    '<div style="height:14px"></div>' +
+    '<button class="btn quiet" id="sUpdate">最新の版に入れ替える</button>' +
     '<div style="height:10px"></div>' +
     '<button class="btn quiet" id="sReconn">接続設定をやり直す</button>' +
     '<p class="tiny muted" style="margin-top:18px;line-height:1.8">データは「健康ログ」の 食材マスタ / 仕入 / 消費 / 在庫外支出 シートに入っています。' +
     'スプレッドシートを直接直しても大丈夫です（直したあとは「最新に更新」を押してください）。</p>'
   );
+
+  $('#sShowTok').onclick = function () {
+    this.outerHTML = '<span class="tiny num" style="word-break:break-all">' + esc(CFG.token || '') + '</span>';
+  };
+  $('#sLink').onclick = function () {
+    var link = cfgLink();
+    var done = function () { toast('コピーしました'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(link).then(done, function () { showLinkFallback(link); });
+    } else showLinkFallback(link);
+  };
+  $('#sUpdate').onclick = function () { toast('入れ替えています…'); hardReload(); };
   var split = function (v) { return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean); };
   $('#sSave').onclick = function () {
     Promise.all([
@@ -721,6 +932,15 @@ function showSettings() {
       .then(function () { toast('保存しました'); });
   };
   $('#sReconn').onclick = function () { closeSheet(); showSetup(); };
+}
+
+/** クリップボードが使えないときは、選択してコピーできる形で出す */
+function showLinkFallback(link) {
+  openSheet('<h3>ホーム画面用リンク</h3>' +
+    '<p class="small muted" style="margin:-8px 0 14px;line-height:1.8">長押しして全部選択してコピーしてください。' +
+    'このリンクにはトークンが入っています。人には送らないでください。</p>' +
+    '<textarea readonly style="width:100%;height:120px;border:1.5px solid var(--line-2);border-radius:12px;padding:12px;font-size:13px;word-break:break-all">' +
+    esc(link) + '</textarea>');
 }
 
 /* ----------------------------------------------------------------- 冷蔵庫 */
@@ -899,7 +1119,9 @@ function renderFoot() {
   el.innerHTML =
     '<div class="pre">' +
       '<label><input type="checkbox" id="cPrep"' + (S.makePrep ? ' checked' : '') + '>作り置きにする</label>' +
-      '<span class="amt">' + (p.length ? p.length + '件 ' + yen1(sum) + (w ? '（うち廃棄 ' + yen1(w) + '）' : '') : '未入力') + '</span>' +
+      '<span class="amt">' + (p.length
+        ? p.length + '件 ' + yen1(sum) + (w ? '（うち廃棄 ' + yen1(w) + '）' : '')
+        : '今日 ' + yen(S.day ? S.day.total : 0)) + '</span>' +
     '</div>' +
     '<button class="btn" id="bRec"' + (p.length && !S.loading ? '' : ' disabled') + '>' +
       (S.loading ? '記録中…' : (S.makePrep ? '作り置きにする' : 'まとめて記録')) + '</button>';
@@ -971,7 +1193,7 @@ function send(p, prepName) {
     if (!r || !r.ok) {
       snap.forEach(function (s) { var l = lotById(s.id); if (l) { l.remain = s.remain; l.status = s.status; } });
       renderFridge(); renderFoot();
-      toast((r && r.error) || '記録できませんでした');
+      toastErr((r && r.error) || '記録できませんでした');
       return;
     }
     (r.lots || []).forEach(function (nl) { var l = lotById(nl.id); if (l) { l.remain = nl.remain; l.status = nl.status; } });
@@ -985,19 +1207,20 @@ function send(p, prepName) {
       }
     }
     if (r.summary && r.summary.ym === S.ym) S.summary = r.summary;
+    if (r.day) S.day = r.day;
     renderFridge(); renderFoot(); renderSummary();
 
     var label = prepName ? ('「' + prepName + '」を作りました') : (yen1(localCost) + ' を' + recMeal + 'に記録しました');
     toast(label, '取り消す', function () {
       call('undo', { consIds: r.consIds, prepLotId: r.prepLot ? r.prepLot.id : null }, opId()).then(function (u) {
-        if (u && u.ok) { refresh(true); toast('取り消しました'); } else toast('取り消せませんでした');
+        if (u && u.ok) { refresh(true); toast('取り消しました'); } else toastErr('取り消せませんでした');
       });
     });
   }).catch(function () {
     S.loading = false;
     qPush({ action: 'record', payload: payload, opId: oid });
     renderFoot();
-    toast('通信できないので端末に保存しました');
+    toast('通信できないので端末に保存しました', null, null, 5000, true);
   });
 }
 
@@ -1136,15 +1359,15 @@ function bindBuy() {
   var go = $('#bLotGo');
   if (go) go.onclick = function () {
     var qty = parseFloat($('#bQ').value), y = parseFloat($('#bY').value);
-    if (!(qty > 0)) return toast('内容量を入れてください');
-    if (!(y >= 0)) return toast('金額を入れてください');
+    if (!(qty > 0)) return toastErr('内容量を入れてください');
+    if (!(y >= 0)) return toastErr('金額を入れてください');
     var date = ($('#bDate') || {}).value || todayStr();
     var item = { foodId: f.id, qty: qty, yen: y, unit: f.unit, date: date, source: '手入力' };
     var oid = opId();
     go.disabled = true;
     call('addLots', { items: [item] }, oid).then(function (r) {
       go.disabled = false;
-      if (!r || !r.ok) return toast((r && r.error) || '登録できませんでした');
+      if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
       r.lots.forEach(function (l) { S.lots.push(l); });
       f.lastQty = qty; f.lastYen = y; f.lastBuy = date;
       S.buyLog.push({ label: f.name, sub: fmtMD(date) + ' · ' + fmtQty(qty, f.unit) + ' · ' + yen(y),
@@ -1155,7 +1378,7 @@ function bindBuy() {
     }).catch(function () {
       go.disabled = false;
       qPush({ action: 'addLots', payload: { items: [item] }, opId: oid });
-      toast('通信できないので端末に保存しました');
+      toast('通信できないので端末に保存しました', null, null, 5000, true);
     });
   };
 
@@ -1178,7 +1401,7 @@ function bindBuy() {
   var og = $('#bOutGo');
   if (og) og.onclick = function () {
     var y = parseFloat($('#oYen').value);
-    if (!(y > 0)) return toast('金額を入れてください');
+    if (!(y > 0)) return toastErr('金額を入れてください');
     var payload = {
       date: $('#oDate').value || todayStr(), kind: S.expKind,
       name: $('#oName').value.trim(), yen: y, meal: S.expMeal, source: '手入力',
@@ -1187,8 +1410,10 @@ function bindBuy() {
     og.disabled = true;
     call('addExpense', payload, oid).then(function (r) {
       og.disabled = false;
-      if (!r || !r.ok) return toast((r && r.error) || '登録できませんでした');
-      if (r.summary && r.summary.ym === S.ym) { S.summary = r.summary; renderSummary(); }
+      if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
+      if (r.summary && r.summary.ym === S.ym) S.summary = r.summary;
+      if (r.day) S.day = r.day;
+      renderSummary(); renderFoot();
       S.buyLog.push({
         label: payload.name || payload.kind,
         sub: fmtMD(payload.date) + ' · ' + payload.kind + (payload.meal ? '（' + payload.meal + '）' : '') + ' · ' + yen(y),
@@ -1199,7 +1424,7 @@ function bindBuy() {
     }).catch(function () {
       og.disabled = false;
       qPush({ action: 'addExpense', payload: payload, opId: oid });
-      toast('通信できないので端末に保存しました');
+      toast('通信できないので端末に保存しました', null, null, 5000, true);
     });
   };
 
@@ -1208,7 +1433,7 @@ function bindBuy() {
       var i = Number(b.dataset.undo), item = S.buyLog[i];
       if (!item) return;
       call('undo', { lotIds: item.lotIds || [], expenseIds: item.expenseIds || [] }, opId()).then(function (r) {
-        if (!r || !r.ok) return toast('取り消せませんでした');
+        if (!r || !r.ok) return toastErr('取り消せませんでした');
         S.buyLog.splice(i, 1);
         refresh(true); renderBuy();
         toast('取り消しました');
@@ -1292,14 +1517,14 @@ function showFoodSheet(foodId) {
       body.id = f.id;
       call('updateFood', body, opId()).then(function (r) {
         $('#nGo').disabled = false;
-        if (!r || !r.ok) return toast((r && r.error) || '保存できませんでした');
+        if (!r || !r.ok) return toastErr((r && r.error) || '保存できませんでした');
         closeSheet();
         refresh(true).then(function () { toast('保存しました'); });
       });
     } else {
       call('addFood', body, opId()).then(function (r) {
         $('#nGo').disabled = false;
-        if (!r || !r.ok) return toast((r && r.error) || '登録できませんでした');
+        if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
         if (!foodById(r.food.id)) S.foods.push(r.food);
         S.buyFood = r.food.id; S.buyQuery = '';
         closeSheet(); renderBuy(); window.scrollTo(0, 0);
@@ -1345,6 +1570,15 @@ function applyReceiptDraft(items) {
 /* ============================================================================
  * ライフサイクル
  * ==========================================================================*/
+/* 設定リンクを同じ画面で開き直したとき（ハッシュだけが変わる＝再読み込みが起きない）に備える */
+window.addEventListener('hashchange', function () {
+  var o = cfgFromHash();
+  if (o && o.t && o.t !== CFG.token) {
+    CFG.url = o.u || CFG.url; CFG.token = o.t; saveCfg();
+    location.reload();
+  }
+});
+
 window.addEventListener('online', flushQueue);
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') {
@@ -1353,6 +1587,7 @@ document.addEventListener('visibilitychange', function () {
     rollDate();
     if (!S.mealTouched) S.meal = autoMeal();
     if (S.tab === 'buy') renderBuy(); else renderFridge();
+    checkVersion(false);
     if (S._lastLoad && Date.now() - S._lastLoad > 10 * 60 * 1000) { S._lastLoad = Date.now(); refresh(true); }
   }
 });

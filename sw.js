@@ -3,7 +3,7 @@
  * 目的はオフライン起動だけ。データはGAS側にあり、そちらはキャッシュしない。
  * アプリを更新したら CACHE の数字を上げること。
  */
-const CACHE = 'fridge-v4';
+const CACHE = 'fridge-v6';
 const SHELL = [
   './',
   './index.html',
@@ -36,7 +36,10 @@ self.addEventListener('fetch', (e) => {
 
   // GASへのAPI呼び出しには一切触らない
   if (req.method !== 'GET') return;
-  if (new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  // 版の判定に使うので、これだけは絶対にキャッシュを挟まない
+  if (url.pathname.endsWith('version.txt')) return;
 
   // 画面はネットワーク優先（更新をすぐ拾う）。落ちていたらキャッシュを出す
   e.respondWith(
