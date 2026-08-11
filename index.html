@@ -161,6 +161,12 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .monthbar{display:flex;align-items:center;justify-content:space-between;margin:0 0 14px}
 .monthbar button{width:46px;height:40px;font-size:22px;color:var(--ink-3)}
 .monthbar .lbl{font-size:15px;font-weight:800}
+.daynav{display:flex;align-items:center;justify-content:space-between;gap:4px;
+  margin:-2px 0 12px;padding-bottom:11px;border-bottom:1px solid var(--line)}
+.daynav button{width:44px;height:38px;font-size:21px;color:var(--ink-3);border-radius:10px}
+.daynav button:disabled{color:var(--line-2)}
+.daynav button:not(:disabled):active{background:var(--accent-tint)}
+.daynav .lbl{font-size:15px;font-weight:800;text-align:center;flex:1}
 .hero{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:26px 16px 22px;text-align:center;
   background-image:linear-gradient(180deg,var(--accent-tint) 0%,rgba(255,255,255,0) 62%)}
 .hero .cap{font-size:12px;font-weight:800;letter-spacing:.12em;color:var(--accent)}
@@ -371,7 +377,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-12a';
+var APP_VERSION = '2026-08-12b';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -521,6 +527,9 @@ var S = {
   buyLog: [],
   expKind: '', expMeal: '',
   pickDay: null,
+  dayDate: '',        // サマリーで見ている日。空なら今日
+  dayCache: {},       // 日付 -> その日の明細（何度も取りに行かないため）
+  dayLoading: false,
   loading: false,
   ocrHasKey: false,
   draft: null,        // レシートから起こした仕入の下書き
@@ -692,6 +701,7 @@ function applyBootstrap(r) {
   if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
   if (r.ocr) S.ocrHasKey = !!r.ocr.hasKey;
+  S.dayCache = {};   // 取り寄せた日の明細は古くなるので捨てる
 }
 
 function refresh(silent) {
@@ -829,15 +839,16 @@ function renderSummary() {
 }
 
 /**
- * 今日ぶんの明細。
+ * 1日ぶんの明細。既定は今日で、‹ › で日をさかのぼれる。
  * 「登録できたのか分からない」を無くすのが目的なので、
  * 記録した行をそのまま時刻順に並べる。廃棄と作り置きへの振替も、
  * 食費には入れないが薄く出す（記録された事実は見せる）。
  */
 function todayHtml() {
-  if (S.ym !== todayStr().slice(0, 7)) return '';
-  var d = S.day;
+  var key = dayKey();
+  var d = dayView();
   var m = (d && d.meals) || { '朝': 0, '昼': 0, '夕': 0, '間食': 0 };
+  var atToday = dayIsToday();
 
   var tiles = ['朝', '昼', '夕', '間食'].map(function (k) {
     var v = m[k] || 0;
@@ -845,8 +856,11 @@ function todayHtml() {
   }).join('');
 
   var list;
-  if (!d || !d.items || !d.items.length) {
-    list = '<div class="empty" style="padding:26px 10px">まだ今日の記録はありません</div>';
+  if (S.dayLoading && !d) {
+    list = '<div class="empty" style="padding:26px 10px">読み込んでいます…</div>';
+  } else if (!d || !d.items || !d.items.length) {
+    list = '<div class="empty" style="padding:26px 10px">' +
+             (atToday ? 'まだ今日の記録はありません' : 'この日の記録はありません') + '</div>';
   } else {
     list = d.items.map(function (x) {
       var qty = x.qty ? '<span>' + esc(fmtQty(x.qty, x.unit)) + '</span>' : '';
@@ -862,13 +876,29 @@ function todayHtml() {
     }).join('');
   }
 
-  return '<div class="sect"><h2>今日</h2><div class="rule"></div>' +
-           '<span class="hint num">' + fmtMD(todayStr()) + '</span></div>' +
+  return '<div class="sect"><h2>日ごとの明細</h2><div class="rule"></div>' +
+           (atToday ? '' : '<button class="lnk" id="dToday">今日へ</button>') + '</div>' +
          '<div class="panel" style="padding:14px">' +
-           '<div class="dayhead"><span class="t">今日の食費</span><span class="v num">' + yen(d ? d.total : 0) + '</span></div>' +
+           '<div class="daynav">' +
+             '<button data-dmv="-1" aria-label="前の日">‹</button>' +
+             '<div class="lbl">' + esc(fmtDayLabel(key)) + '</div>' +
+             '<button data-dmv="1"' + (atToday ? ' disabled' : '') + ' aria-label="次の日">›</button>' +
+           '</div>' +
+           '<div class="dayhead"><span class="t">' + (atToday ? '今日の食費' : 'この日の食費') + '</span>' +
+             '<span class="v num">' + yen(d ? d.total : 0) + '</span></div>' +
            '<div class="mealrow">' + tiles + '</div>' +
            list +
          '</div>';
+}
+
+/** 8月11日（火）。今日と昨日は言葉でも出す */
+function fmtDayLabel(key) {
+  var p = String(key).split('-');
+  if (p.length !== 3) return String(key);
+  var wd = ['日','月','火','水','木','金','土'][new Date(p[0], Number(p[1]) - 1, Number(p[2])).getDay()];
+  var name = key === todayStr() ? '今日 ' : (key === shiftDayKey(todayStr(), -1) ? '昨日 ' : '');
+  var yy = p[0] === todayStr().slice(0, 4) ? '' : (p[0] + '年');
+  return name + yy + Number(p[1]) + '月' + Number(p[2]) + '日（' + wd + '）';
 }
 
 /** 日別の棒。1系列なので凡例は不要。タップでその日の内訳を出す */
@@ -899,6 +929,34 @@ function barsHtml(s) {
          '<div class="read" id="dayRead"></div>';
 }
 
+/* ---- サマリーの「日ごとの明細」 ---------------------------------------- */
+function dayKey() { return S.dayDate || todayStr(); }
+function dayIsToday() { return dayKey() === todayStr(); }
+
+/** いま表示している日の明細。今日はbootstrapの値、それ以外は取り寄せた値 */
+function dayView() { return dayIsToday() ? S.day : (S.dayCache[dayKey()] || null); }
+
+function shiftDayKey(base, n) {
+  var p = base.split('-');
+  var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + n);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+/** その日を表示する。持っていなければ取りに行く */
+function showDay(date) {
+  if (date > todayStr()) return;            // 未来には行かない
+  S.dayDate = date;
+  S.pickDay = date;
+  if (dayView()) { renderSummary(); return; }
+  S.dayLoading = true;
+  renderSummary();
+  call('day', { date: date }).then(function (r) {
+    S.dayLoading = false;
+    if (r && r.ok && r.day) S.dayCache[date] = r.day;
+    renderSummary();
+  }).catch(function () { S.dayLoading = false; renderSummary(); });
+}
+
 function paintDayRead() {
   var el = $('#dayRead');
   if (!el) return;
@@ -918,18 +976,21 @@ $('#v-summary').addEventListener('click', function (e) {
     var dd = Number(mv.dataset.mv);
     var y = Number(S.ym.slice(0, 4)), m = Number(S.ym.slice(5, 7)) + dd;
     if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; }
-    S.ym = y + '-' + pad(m); S.pickDay = null;
-    renderSummary();
+    S.ym = y + '-' + pad(m);
+    // 明細も同じ月へ。当月なら今日、過去の月ならその月の末日
+    var last = S.ym + '-' + pad(new Date(y, m, 0).getDate());
+    showDay(S.ym === todayStr().slice(0, 7) ? todayStr() : (last > todayStr() ? todayStr() : last));
     call('summary', { ym: S.ym }).then(function (r) { if (r && r.ok) { S.summary = r.summary; renderSummary(); } });
     return;
   }
+  var dmv = e.target.closest('[data-dmv]');
+  if (dmv && !dmv.disabled) { showDay(shiftDayKey(dayKey(), Number(dmv.dataset.dmv))); return; }
+  if (e.target.id === 'dToday') { showDay(todayStr()); return; }
+
   var bar = e.target.closest('[data-day]');
   if (bar) {
-    S.pickDay = bar.dataset.day;
-    $$('#bars b').forEach(function (b) { b.classList.remove('on'); });
-    var mark = $('b', bar);
-    if (mark && !mark.classList.contains('today')) mark.classList.add('on');
-    paintDayRead();
+    // 棒をタップしたら、その日の明細まで開く
+    showDay(bar.dataset.day);
     return;
   }
   if (e.target.id === 'bRefresh') { toast('更新中…'); refresh().then(function () { toast('更新しました'); }); return; }
@@ -1328,6 +1389,7 @@ function send(p, prepName) {
     }
     if (r.summary && r.summary.ym === S.ym) S.summary = r.summary;
     if (r.day) S.day = r.day;
+    S.dayCache = {};   // 過去日に入れた場合、その日の明細も取り直す
     renderFridge(); renderFoot(); renderSummary();
 
     var label = prepName ? ('「' + prepName + '」を作りました') : (yen1(localCost) + ' を' + recMeal + 'に記録しました');
@@ -1544,6 +1606,7 @@ function bindBuy() {
       if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
       if (r.summary && r.summary.ym === S.ym) S.summary = r.summary;
       if (r.day) S.day = r.day;
+      S.dayCache = {};
       renderSummary(); renderFoot();
       S.buyLog.push({
         label: payload.name || payload.kind,
