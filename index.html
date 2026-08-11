@@ -240,10 +240,12 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .row:last-child{border-bottom:0}
 .row.act{background:var(--accent-tint)}
 .row.waste{background:var(--danger-tint)}
+.row.adj{background:repeating-linear-gradient(135deg,var(--surface-2),var(--surface-2) 7px,#eceae4 7px,#eceae4 14px)}
 .row .nm{text-align:left;min-width:0;padding:2px 0}
 .row .nm .t{display:block;font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row .nm .s{display:block;font-size:11px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;font-variant-numeric:tabular-nums}
 .row.waste .nm .s{color:var(--danger)}
+.row.adj .nm .s{color:var(--ink-2);font-weight:700}
 .lotb{display:inline-block;font-style:normal;font-size:10px;font-weight:800;color:#fff;background:var(--ink-3);
   border-radius:999px;padding:1px 6px;margin-left:6px;vertical-align:1px}
 .qin{position:relative;display:block}
@@ -259,9 +261,18 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .lotbtn{display:block;width:100%;text-align:left;border:1.5px solid var(--line-2);border-radius:11px;
   padding:9px 11px;margin-bottom:6px;background:var(--surface);font-size:13px;font-variant-numeric:tabular-nums}
 .lotbtn.on{border-color:var(--accent);background:var(--accent-tint);font-weight:700}
-.acts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-top:10px}
+.acts{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:10px}
 .acts button{height:40px;border:1.5px solid var(--line-2);border-radius:11px;font-size:13px;font-weight:700;background:var(--surface)}
 .acts button.danger.on{background:var(--danger);border-color:var(--danger);color:#fff}
+.acts button.adj.on{background:var(--ink-2);border-color:var(--ink-2);color:#fff}
+.bfill{border:1.5px dashed var(--line-2);border-radius:14px;padding:12px;margin:2px 0 14px;background:var(--surface-2)}
+.bfill .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.bfill .hd b{font-size:13px;font-weight:800}
+.trio{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.trio .fld:last-child{grid-column:1 / -1}
+.trio .inw input{height:44px;font-size:16px}
+.dupwarn{margin:-4px 0 12px;padding:10px 12px;border:1.5px solid var(--warn);background:var(--warn-tint);
+  border-radius:12px;font-size:12px;line-height:1.7;color:var(--ink)}
 
 .foot{position:fixed;left:0;right:0;bottom:calc(var(--tabh) + env(safe-area-inset-bottom));z-index:30;
   background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
@@ -377,7 +388,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-12b';
+var APP_VERSION = '2026-08-12c';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -524,6 +535,7 @@ var S = {
   makePrep: false,
   buyMode: 'lot', buyFood: null, buyQuery: '',
   buyDate: '', buyDateTouched: false,
+  backfill: false, backfillDone: false,   // 記録を始める前に買った分を、残っている量だけで登録する
   buyLog: [],
   expKind: '', expMeal: '',
   pickDay: null,
@@ -824,6 +836,7 @@ function renderSummary() {
         ' <span class="tiny" style="color:var(--ink-3)">' + s.eatOutRatio + '%</span></span></div>' +
       '<div class="kv"><span class="k">冷蔵庫の在庫金額</span><span class="v num">' + yen(s.stockValue) + '</span></div>' +
       (s.waste ? '<div class="kv"><span class="k">廃棄（食費には含めない）</span><span class="v num" style="color:var(--danger)">' + yen(s.waste) + '</span></div>' : '') +
+      (s.adjusted ? '<div class="kv"><span class="k">調整（在庫合わせ・食費にも廃棄にも入れない）</span><span class="v num" style="color:var(--ink-3)">' + yen(s.adjusted) + '</span></div>' : '') +
       (s.byMeal && s.byMeal['未分類'] ? '<div class="kv"><span class="k">食事区分なし</span><span class="v num">' + yen(s.byMeal['未分類']) + '</span></div>' : '') +
     '</div>' +
 
@@ -1167,18 +1180,22 @@ function rowHtml(foodId, lots, cat) {
   var pctVal = q && lot.remain ? Math.round(q / lot.remain * 100) : '';
   var qVal = q ? (Math.round(q * 10) / 10) : '';
   var isWaste = S.kind[lot.id] === '廃棄';
+  var isAdj = S.kind[lot.id] === '調整';
   var isAll = q > 0 && Math.abs(q - lot.remain) < 0.005;
 
   // 作り置きは内容量100の%管理。数量欄を出しても%と同じ数字になるので%だけにする
   var sub = isPrep
     ? (fmtMD(lot.date) + '作成 · ' + yen(lot.yen) + ' · 残り' + pctLeft + '%')
     : ('残り' + pctLeft + '% · ' + fmtQty(lot.remain, unit) + ' · ' + fmtUnitPrice(lot.perU, unit));
+  if (q > 0 && isWaste) sub = '捨てた分として引きます · ' + sub;
+  if (q > 0 && isAdj)   sub = '数を合わせるだけ（食費に入れない） · ' + sub;
 
   var badge = lots.length > 1 ? '<em class="lotb">' + lots.length + '</em>' : '';
   var open = S.open === foodId;
 
   var row =
-    '<div class="row' + (isPrep ? ' prep' : '') + (q > 0 ? ' act' : '') + (isWaste && q > 0 ? ' waste' : '') +
+    '<div class="row' + (isPrep ? ' prep' : '') + (q > 0 ? ' act' : '') +
+      (isWaste && q > 0 ? ' waste' : '') + (isAdj && q > 0 ? ' adj' : '') +
       '" data-food="' + esc(foodId) + '" data-lot="' + esc(lot.id) + '">' +
       '<button class="nm" data-act="detail"><span class="t">' + esc(name) + badge + '</span>' +
         '<span class="s">' + esc(sub) + '</span></button>' +
@@ -1204,8 +1221,12 @@ function rowHtml(foodId, lots, cat) {
     '<div class="acts">' +
       '<button data-act="all2">使い切り</button>' +
       '<button class="danger' + (isWaste ? ' on' : '') + '" data-act="waste">捨てた</button>' +
+      '<button class="adj' + (isAdj ? ' on' : '') + '" data-act="adjust">数を合わせる</button>' +
       '<button data-act="clear">入力を消す</button>' +
     '</div>' +
+    '<div class="lab" style="margin-top:8px;line-height:1.7">' +
+      '「数を合わせる」は<b>食費にも廃棄にも入りません</b>。記録を始める前に食べた分など、' +
+      '実際の残りに数量だけ合わせたいときに使います。</div>' +
     '<div class="lab" style="margin-top:12px">このロット: ' + fmtQty(lot.qty, unit) + ' / ' + yen(lot.yen) +
       ' で ' + fmtMD(lot.date) + ' 購入</div>' +
     (isPrep ? '' : '<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
@@ -1246,9 +1267,10 @@ $('#v-fridge').addEventListener('click', function (e) {
     else S.ent[lot.id] = lot.remain;
     renderFridge(); renderFoot(); return;
   }
-  if (act === 'waste') {
-    if (S.kind[lot.id] === '廃棄') delete S.kind[lot.id];
-    else { S.kind[lot.id] = '廃棄'; if (!S.ent[lot.id]) S.ent[lot.id] = lot.remain; }
+  if (act === 'waste' || act === 'adjust') {
+    var k = (act === 'waste') ? '廃棄' : '調整';
+    if (S.kind[lot.id] === k) delete S.kind[lot.id];
+    else { S.kind[lot.id] = k; if (!S.ent[lot.id]) S.ent[lot.id] = lot.remain; }
     renderFridge(); renderFoot(); return;
   }
   if (act === 'clear') { delete S.ent[lot.id]; delete S.kind[lot.id]; renderFridge(); renderFoot(); return; }
@@ -1273,6 +1295,7 @@ $('#v-fridge').addEventListener('input', function (e) {
 
   host.classList.toggle('act', q > 0);
   host.classList.toggle('waste', q > 0 && S.kind[lot.id] === '廃棄');
+  host.classList.toggle('adj', q > 0 && S.kind[lot.id] === '調整');
   var ab = $('.allb', host);
   if (ab) ab.classList.toggle('on', q > 0 && Math.abs(q - lot.remain) < 0.005);
   renderFoot();
@@ -1290,13 +1313,15 @@ function renderFoot() {
   var p = pendingList();
   var sum = p.reduce(function (a, x) { return a + x.qty * x.lot.perU; }, 0);
   var w = p.filter(function (x) { return x.kind === '廃棄'; }).reduce(function (a, x) { return a + x.qty * x.lot.perU; }, 0);
+  var aj = p.filter(function (x) { return x.kind === '調整'; }).reduce(function (a, x) { return a + x.qty * x.lot.perU; }, 0);
 
   el.className = 'foot';
   el.innerHTML =
     '<div class="pre">' +
       '<label><input type="checkbox" id="cPrep"' + (S.makePrep ? ' checked' : '') + '>作り置きにする</label>' +
       '<span class="amt' + (recIsToday() ? '' : ' past') + '">' + (p.length
-        ? p.length + '件 ' + yen1(sum) + (w ? '（うち廃棄 ' + yen1(w) + '）' : '')
+        ? p.length + '件 ' + yen1(sum) +
+          ((w || aj) ? '（' + [w ? '廃棄 ' + yen1(w) : '', aj ? '調整 ' + yen1(aj) : ''].filter(Boolean).join(' · ') + '）' : '')
         : (recIsToday() ? '今日 ' + yen(S.day ? S.day.total : 0)
                         : fmtMD(recDate()) + ' に記録します')) + '</span>' +
     '</div>' +
@@ -1457,6 +1482,7 @@ function buyPickHtml() {
               '<em class="src ' + (f.lastYen ? 'prev' : 'blank') + '">' + (f.lastYen ? '前回値' : '　') + '</em></label>' +
           '</div>' +
           '<div class="perg" id="bPerU">&nbsp;</div>' +
+          backfillHtml(f) +
           '<button class="btn" id="bLotGo">登録する</button>' +
         '</div>' +
       '</div>';
@@ -1483,6 +1509,56 @@ function buyPickHtml() {
     '<button class="btn quiet" id="bNewFood">＋ 新しい食材を登録</button>';
 }
 
+/**
+ * 記録を始める前に買ったものを登録するための補助。
+ * レシートの量と金額をそのまま入れると、すでに食べた分まで在庫になってしまい、
+ * あとで「廃棄」で消すはめになる（実際には捨てていないのに廃棄が増える）。
+ * 買ったときの量と金額、いま残っている量を入れて、金額を按分して埋める。
+ */
+function backfillHtml(f) {
+  if (!S.backfill) {
+    return '<button class="lnk" id="bBackfill" style="display:block;margin:2px 0 12px">' +
+           '記録を始める前に買った分を入れる</button>';
+  }
+  return '<div class="bfill">' +
+    '<div class="hd"><b>記録を始める前に買った分</b>' +
+      '<button class="lnk" id="bBackfillOff">やめる</button></div>' +
+    '<p class="tiny muted" style="margin:0 0 10px;line-height:1.7">' +
+      '買ったときの量と金額、いま残っている量を入れてください。' +
+      '<b>残っている分だけ</b>を、その量に見合う金額で登録します。' +
+      'すでに食べた分は最初から在庫に入らないので、あとで消す必要がありません。</p>' +
+    '<div class="trio">' +
+      '<label class="fld"><span>買ったときの量</span>' +
+        '<div class="inw"><input id="bfQ" inputmode="decimal"><i>' + esc(f.unit) + '</i></div></label>' +
+      '<label class="fld"><span>買ったときの金額</span>' +
+        '<div class="inw"><input id="bfY" inputmode="decimal"><i>円</i></div></label>' +
+      '<label class="fld"><span>いま残っている量</span>' +
+        '<div class="inw"><input id="bfR" inputmode="decimal"><i>' + esc(f.unit) + '</i></div></label>' +
+    '</div>' +
+    '<div class="perg" id="bfOut">&nbsp;</div>' +
+    '<button class="btn line" id="bfApply">この内容で上の欄を埋める</button>' +
+  '</div>';
+}
+
+/**
+ * 在庫外支出に、在庫として持っている品名を入れようとしていたら知らせる。
+ * 同じ買い物を「在庫外支出」と「仕入→消費」の両方に入れると、
+ * 同じお金が2回数えられてしまうため（登録は止めない。判断は本人がする）
+ */
+function paintDupWarn(name) {
+  var el = $('#oDup');
+  if (!el) return;
+  var f = normalizeFoodName(String(name || '').trim());
+  if (!f || String(name).trim().length < 2) { el.hidden = true; el.innerHTML = ''; return; }
+
+  var stock = (S.lots || []).filter(function (l) { return l.foodId === f.id && l.remain > 0; });
+  el.hidden = false;
+  el.innerHTML = '「' + esc(f.name) + '」は<b>食材として登録されています</b>' +
+    (stock.length ? '（いま在庫あり）' : '') + '。<br>' +
+    'これを在庫外支出に入れると、仕入と二重に数える可能性があります。' +
+    '持ち帰って残るものなら「食材の仕入」へ、その場で食べ切ったものならこのままで大丈夫です。';
+}
+
 function buyOutHtml() {
   var kinds = S.outKinds.length ? S.outKinds : ['外食', '飲料', '調味料', '米', '菓子', 'その他'];
   return dateFieldHtml('oDate', '日付') +
@@ -1494,10 +1570,15 @@ function buyOutHtml() {
       '<button class="tag mut' + (S.expMeal === '' ? ' on' : '') + '" data-om="">なし</button>' +
     '</div></div>' +
     '<label class="fld"><span>店名・品名</span><div class="inw wide"><input id="oName" placeholder="例: 松屋 / 紙パックのジュース"></div></label>' +
+    '<div class="dupwarn" id="oDup" hidden></div>' +
     '<label class="fld"><span>金額</span><div class="inw"><input id="oYen" inputmode="decimal" enterkeyhint="done"><i>円</i></div></label>' +
     '<div style="height:6px"></div>' +
     '<button class="btn" id="bOutGo">登録する</button>' +
-    '<p class="tiny muted" style="margin:16px 2px 0;line-height:1.9">調味料・油・米・粉・乾物・飲料は、買った日に全額を計上して終わりです。使うたびの記録はしません。<br>' +
+    '<p class="tiny muted" style="margin:16px 2px 0;line-height:1.9">' +
+    '<b>その場で食べ切るもの</b>（外食・飲料・菓子）はこちら。買った日に全額を計上して終わりです。<br>' +
+    '<b>持ち帰って残るもの</b>は「食材の仕入」に入れて、食べたときに冷蔵庫タブで記録します。' +
+    '両方に入れると同じお金を二重に数えてしまいます。<br>' +
+    '調味料・油・米・粉・乾物は、使うたびの記録が大変なのでこちら（買った日に全額）で構いません。<br>' +
     '「朝食のつもりで飲んだジュース」のように、外食でなくても食事区分を付けられます。</p>';
 }
 
@@ -1549,13 +1630,46 @@ function bindBuy() {
   var ef = $('#bEditFood');
   if (ef) ef.onclick = function () { showEditFood(S.buyFood); };
 
+  var bfOn = $('#bBackfill');
+  if (bfOn) bfOn.onclick = function () { S.backfill = true; renderBuy(); };
+  var bfOff = $('#bBackfillOff');
+  if (bfOff) bfOff.onclick = function () { S.backfill = false; renderBuy(); };
+
+  var bfCalc = function () {
+    var el = $('#bfOut'); if (!el || !f) return null;
+    var q = parseFloat(($('#bfQ') || {}).value);
+    var y = parseFloat(($('#bfY') || {}).value);
+    var r = parseFloat(($('#bfR') || {}).value);
+    if (!(q > 0) || !(y >= 0) || !(r >= 0)) { el.textContent = ' '; return null; }
+    if (r > q) { el.innerHTML = '<span style="color:var(--danger)">残りが買った量より多いです</span>'; return null; }
+    var yen2 = Math.round(y * r / q * 100) / 100;
+    el.innerHTML = '登録するのは <b>' + esc(fmtQty(r, f.unit)) + ' / ' + yen(yen2) + '</b>' +
+      '<span class="tiny" style="color:var(--ink-3)">（' + yen(y) + ' × ' + fmtQty(r, f.unit) + ' ÷ ' + fmtQty(q, f.unit) + '）</span>';
+    return { qty: r, yen: yen2 };
+  };
+  ['#bfQ', '#bfY', '#bfR'].forEach(function (id) { if ($(id)) $(id).oninput = bfCalc; });
+  if ($('#bfOut')) bfCalc();
+
+  var bfGo = $('#bfApply');
+  if (bfGo) bfGo.onclick = function () {
+    var v = bfCalc();
+    if (!v) return toastErr('買ったときの量・金額と、いまの残りを入れてください');
+    S.backfill = false;
+    S.backfillDone = true;          // 由来を「遡及登録」にするための印
+    renderBuy();
+    $('#bQ').value = v.qty; $('#bY').value = v.yen;
+    if ($('#bPerU')) $('#bPerU').textContent = '= ' + fmtUnitPrice(v.yen / v.qty, f.unit);
+    toast('残っている分だけを入れました');
+  };
+
   var go = $('#bLotGo');
   if (go) go.onclick = function () {
     var qty = parseFloat($('#bQ').value), y = parseFloat($('#bY').value);
     if (!(qty > 0)) return toastErr('内容量を入れてください');
     if (!(y >= 0)) return toastErr('金額を入れてください');
     var date = ($('#bDate') || {}).value || todayStr();
-    var item = { foodId: f.id, qty: qty, yen: y, unit: f.unit, date: date, source: '手入力' };
+    var item = { foodId: f.id, qty: qty, yen: y, unit: f.unit, date: date,
+                 source: S.backfillDone ? '遡及登録' : '手入力' };
     var oid = opId();
     go.disabled = true;
     call('addLots', { items: [item] }, oid).then(function (r) {
@@ -1565,7 +1679,7 @@ function bindBuy() {
       f.lastQty = qty; f.lastYen = y; f.lastBuy = date;
       S.buyLog.push({ label: f.name, sub: fmtMD(date) + ' · ' + fmtQty(qty, f.unit) + ' · ' + yen(y),
                       lotIds: r.lots.map(function (l) { return l.id; }) });
-      S.buyFood = null; S.buyQuery = '';
+      S.buyFood = null; S.buyQuery = ''; S.backfillDone = false;
       renderBuy(); renderFridge();
       toast(f.name + ' を登録しました');
     }).catch(function () {
@@ -1577,6 +1691,10 @@ function bindBuy() {
 
   var nf = $('#bNewFood');
   if (nf) nf.onclick = function () { showFoodSheet(null); };
+
+  var on = $('#oName');
+  if (on) on.oninput = function () { paintDupWarn(this.value); };
+  if (on) paintDupWarn(on.value);
 
   var ok = $('#oKinds');
   if (ok) ok.onclick = function (e) {
