@@ -76,9 +76,14 @@ const DEFAULT_UNITS = ['g', 'ml', '個', '本', '枚'];
 const KIND = {
   use:   '消費',
   waste: '廃棄',
-  adj:   '使い切り調整',
+  /** 記録ミスの訂正。実際に食べても捨ててもいないので、食費にも廃棄にも入れない。
+   *  記録開始前に食べた分など、在庫の数量だけを実態に合わせるための区分 */
+  adj:   '調整',
   prep:  '作り置きへ振替',
 };
+
+/** 食費に計上しない種別 */
+const NOT_COUNTED = [KIND.waste, KIND.prep, KIND.adj];
 
 const MEALS = ['朝', '昼', '夕', '間食'];
 
@@ -687,7 +692,7 @@ function buildSummary_(ym) {
 
   const byMeal = { '朝': 0, '昼': 0, '夕': 0, '間食': 0, '': 0 };
   const byDate = {};
-  let consTotal = 0, wasteTotal = 0, prepTotal = 0;
+  let consTotal = 0, wasteTotal = 0, prepTotal = 0, adjTotal = 0;
 
   const bump = function (date, meal, yen) {
     if (!byDate[date]) byDate[date] = { total: 0, meals: { '朝': 0, '昼': 0, '夕': 0, '間食': 0, '': 0 } };
@@ -702,6 +707,7 @@ function buildSummary_(ym) {
     const kind = String(c['種別']);
     if (kind === KIND.waste) { wasteTotal += yen; return; }
     if (kind === KIND.prep)  { prepTotal  += yen; return; }
+    if (kind === KIND.adj)   { adjTotal   += yen; return; }
     const meal = String(c['食事区分'] || '');
     consTotal += yen;
     byMeal[meal in byMeal ? meal : ''] += yen;
@@ -747,6 +753,7 @@ function buildSummary_(ym) {
     eatOut: r2_(eatOutTotal),
     eatOutRatio: total ? Math.round(eatOutTotal / total * 1000) / 10 : 0,
     waste: r2_(wasteTotal),
+    adjusted: r2_(adjTotal),
     prepTransferred: r2_(prepTotal),
     stockValue: r2_(stockValue),
     byDate: byDate,
@@ -768,7 +775,7 @@ function buildDay_(date) {
     if (d2s_(c['日付'] || String(c['日時']).slice(0, 10)) !== d0) return;
     const kind = String(c['種別']);
     const yen = num_(c['金額']);
-    const counted = (kind !== KIND.waste && kind !== KIND.prep);
+    const counted = NOT_COUNTED.indexOf(kind) < 0;
     const meal = String(c['食事区分'] || '');
     if (counted) { total += yen; meals[meal in meals ? meal : ''] += yen; }
     items.push({
