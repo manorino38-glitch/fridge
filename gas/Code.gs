@@ -178,6 +178,7 @@ function migrate_(key) {
     });
 
   sh.clear();
+  ensureRoom_(sh, Math.max(2, remapped.length + 1), want.length);
   sh.getRange(1, 1, 1, want.length).setValues([want]).setFontWeight('bold').setBackground('#f1f3f4');
   sh.setFrozenRows(1);
   applyFormats_(sh, want);
@@ -253,7 +254,7 @@ function handle_(req) {
     return dispatch_(req.action, p);
 
   } catch (err) {
-    return { ok: false, error: String(err && err.message ? err.message : err) };
+    return { ok: false, error: String(err && err.message ? err.message : err), stack: String(err && err.stack || '') };
   }
 }
 
@@ -341,7 +342,9 @@ function apiAddFood_(p) {
     '前回の円': p.lastYen != null ? num_(p.lastYen) : '',
     '更新日時': nowStr_(),
   });
-  sheet_('foods').appendRow(row);
+  const shF = sheet_('foods');
+  ensureRoom_(shF, shF.getLastRow() + 1, HEADERS.foods.length);
+  shF.appendRow(row);
 
   return { ok: true, food: {
     id: id, name: name, aliases: String(p.aliases || ''),
@@ -428,13 +431,15 @@ function apiAddLots_(p) {
       // 次回の初期値として控えておく（仕様書5-3の「前回値」）
       const fr = findRow_(shFoods, col_('foods', '食材ID'), String(it.foodId));
       if (fr > 0) {
-        shFoods.getRange(fr, col_('foods', '前回の量'), 1, 2)
-               .setNumberFormat('0.############').setValues([[qty, yen]]);
-        shFoods.getRange(fr, col_('foods', '更新日時')).setNumberFormat('@').setValue(now);
+        setCell_(shFoods, fr, col_('foods', '前回の量'), qty, '0.############');
+        setCell_(shFoods, fr, col_('foods', '前回の円'), yen, '0.############');
+        setCell_(shFoods, fr, col_('foods', '更新日時'), now, '@');
       }
     });
 
-    shLots.getRange(shLots.getLastRow() + 1, 1, rows.length, HEADERS.lots.length).setValues(rows);
+    const at = shLots.getLastRow() + 1;
+    ensureRoom_(shLots, at + rows.length - 1, HEADERS.lots.length);
+    shLots.getRange(at, 1, rows.length, HEADERS.lots.length).setValues(rows);
     return { ok: true, lots: created };
 
   } finally { lock.releaseLock(); }
@@ -511,6 +516,7 @@ function apiRecord_(p) {
       const foodId = ensurePrepFood_(prepName);
       const lotId = newId_('L');
       const cost = Math.round(prepCost * 100) / 100;
+      ensureRoom_(shLots, shLots.getLastRow() + 1, HEADERS.lots.length);
       shLots.appendRow(rowFor_('lots', {
         'ロットID': lotId, '日付': date, '食材ID': foodId, '品名': prepName,
         '単位': PREP_UNIT_LABEL, '内容量': PREP_UNIT, '金額': cost, '円/単位': cost / PREP_UNIT,
@@ -525,7 +531,9 @@ function apiRecord_(p) {
       consRows.forEach(function (r) { if (r[ki] === KIND.prep) r[ti] = lotId; });
     }
 
-    shCons.getRange(shCons.getLastRow() + 1, 1, consRows.length, HEADERS.cons.length).setValues(consRows);
+    const catCons = shCons.getLastRow() + 1;
+    ensureRoom_(shCons, catCons + consRows.length - 1, HEADERS.cons.length);
+    shCons.getRange(catCons, 1, consRows.length, HEADERS.cons.length).setValues(consRows);
 
     return {
       ok: true, consIds: consIds, lots: touched, prepLot: prepLot,
@@ -551,7 +559,9 @@ function apiAddExpense_(p) {
   const meal = MEALS.indexOf(String(p.meal)) >= 0 ? String(p.meal) : '';
   const id = newId_('O');
 
-  sheet_('out').appendRow(rowFor_('out', {
+  const shO = sheet_('out');
+  ensureRoom_(shO, shO.getLastRow() + 1, HEADERS.out.length);
+  shO.appendRow(rowFor_('out', {
     '支出ID': id, '日付': date, '区分': kind, '店名・品名': String(p.name || ''),
     '金額': yen, '食事区分': meal, '由来': String(p.source || '手入力'), '作成日時': nowStr_(),
   }));
@@ -811,6 +821,31 @@ function rowFor_(key, obj) {
   return HEADERS[key].map(function (h) { return obj[h] !== undefined ? obj[h] : ''; });
 }
 
+/**
+ * 1マスだけ書式と値を入れる。
+ * シートが Google の「テーブル」になっていると、2列以上にまたがる書式指定が
+ * 「列単位の操作を行うには、1つの列内で1つだけ選択してください。」で弾かれる。
+ * 列をまたがない形に分けておけば、テーブルでも普通のシートでも通る。
+ */
+function setCell_(sh, row, col, value, format) {
+  const r = sh.getRange(row, col);
+  if (format) r.setNumberFormat(format);
+  r.setValue(value);
+}
+
+/**
+ * シートの枠（行数・列数）が足りているか確かめて、足りなければ広げる。
+ * 枠の外に setValues しようとすると Sheets が
+ * 「列単位の操作を行うには、1つの列内で1つだけ選択してください。」という
+ * 分かりにくい例外を投げるので、書き込む前に必ず通す。
+ */
+function ensureRoom_(sh, lastRow, lastCol) {
+  const mr = sh.getMaxRows();
+  if (mr < lastRow) sh.insertRowsAfter(mr, lastRow - mr);
+  const mc = sh.getMaxColumns();
+  if (mc < lastCol) sh.insertColumnsAfter(mc, lastCol - mc);
+}
+
 /** 列ごとの表示形式を明示する。何度呼んでも安全 */
 function applyFormats_(sh, headers) {
   const rows = Math.max(1, sh.getMaxRows() - 1);
@@ -900,7 +935,9 @@ function ensurePrepFood_(name) {
   if (hit) return String(hit['食材ID']);
 
   const id = newId_('F');
-  sheet_('foods').appendRow(rowFor_('foods', {
+  const shPf = sheet_('foods');
+  ensureRoom_(shPf, shPf.getLastRow() + 1, HEADERS.foods.length);
+  shPf.appendRow(rowFor_('foods', {
     '食材ID': id, '品名': name, '表記ゆれ': '', '置き場カテゴリ': '作り置き',
     '単位': PREP_UNIT_LABEL, '在庫管理する': true,
     '前回の量': PREP_UNIT, '前回の円': '', '更新日時': nowStr_(),
@@ -924,7 +961,7 @@ function setConf_(key, value) {
   const sh = sheet_('conf');
   const r = findRow_(sh, 1, key);
   if (r > 0) sh.getRange(r, 2).setValue(value);
-  else sh.appendRow([key, value]);
+  else { ensureRoom_(sh, sh.getLastRow() + 1, HEADERS.conf.length); sh.appendRow([key, value]); }
 }
 
 function newId_(prefix) {
