@@ -289,6 +289,7 @@ function dispatch_(action, p) {
     case 'setCategories': return apiSetConf_('categories', p.categories);
     case 'setOutKinds':   return apiSetConf_('outKinds', p.outKinds);
     case 'setUnits':      return apiSetConf_('units', p.units);
+    case 'fixLot':        return apiFixLot_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
     case 'ocrStatus':     return apiOcrStatus_(p);
@@ -832,6 +833,58 @@ function daysElapsed_(ym) {
 }
 
 
+/**
+ * 仕入の金額を後から直す。
+ * 円/単位を出し直し、そのロットから出た消費行の金額も同じ単価で引き直す。
+ * 数量には触らないので、残量や在庫の状態は変わらない。
+ * （税抜で入れてしまったものを税込に直す、打ち間違いを直す、などに使う）
+ */
+function apiFixLot_(p) {
+  const lotId = String((p && p.lotId) || '');
+  const newYen = num_(p && p.yen);
+  if (!lotId) return { ok: false, error: 'どの仕入かが指定されていません' };
+  if (!(newYen > 0)) return { ok: false, error: '金額を入れてください' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const shLots = sheet_('lots');
+    const lot = readAll_('lots').filter(function (l) { return String(l['ロットID']) === lotId; })[0];
+    if (!lot) return { ok: false, error: 'その仕入が見つかりません' };
+
+    const qty = num_(lot['内容量']);
+    if (!(qty > 0)) return { ok: false, error: '内容量が0の仕入は直せません' };
+
+    const oldYen = num_(lot['金額']);
+    const perU = newYen / qty;
+    setCell_(shLots, lot._row, col_('lots', '金額'),    newYen, '0.############');
+    setCell_(shLots, lot._row, col_('lots', '円/単位'), perU,   '0.############');
+
+    // このロットから出た消費行の金額も引き直す（食費の集計はこちらを見ているため）
+    const shCons = sheet_('cons');
+    const touched = [];
+    readAll_('cons').forEach(function (c) {
+      if (String(c['ロットID']) !== lotId) return;
+      const before = num_(c['金額']);
+      const after = r2_(num_(c['使用量']) * perU);
+      setCell_(shCons, c._row, col_('cons', '金額'), after, '0.############');
+      touched.push({
+        id: String(c['消費ID']), date: d2s_(c['日付'] || String(c['日時']).slice(0, 10)),
+        kind: String(c['種別']), before: r2_(before), after: after,
+      });
+    });
+
+    return {
+      ok: true,
+      lot: { id: lotId, name: String(lot['品名']), qty: qty, unit: String(lot['単位'] || ''),
+             before: r2_(oldYen), after: r2_(newYen), perU: r2_(perU) },
+      cons: touched,
+      summary: buildSummary_(d2s_(lot['日付']).slice(0, 7)),
+    };
+  } finally { lock.releaseLock(); }
+}
+
+
 /* =============================================================================
  * レシート読取（仕様書 7-1 / 7-2）
  *
@@ -850,6 +903,8 @@ const OCR_SCHEMA = {
   properties: {
     date:  { type: 'string', description: '購入日。yyyy-MM-dd。読み取れなければ空文字' },
     store: { type: 'string', description: '店名。読み取れなければ空文字' },
+    taxMode: { type: 'string', description: '各行の金額が税抜なら「外税」、税込なら「内税」。判断できなければ「不明」' },
+    total:   { type: 'number', description: 'レシートの支払合計（税込）。読めなければ0' },
     items: {
       type: 'array',
       description: '買った品物の行だけ',
@@ -860,6 +915,7 @@ const OCR_SCHEMA = {
           yen:  { type: 'number', description: '税込の支払額。値引が紐づく行は引いたあとの額' },
           qty:  { type: 'number', description: '品名から内容量が分かるときだけ。「牛乳1000ml」なら1000。不明なら0' },
           unit: { type: 'string', description: 'qtyの単位。g / ml / 個 / 本 / 枚 のいずれか。不明なら空文字' },
+          taxRate: { type: 'number', description: 'その行の税率。軽減税率（※印など）は8、それ以外は10。分からなければ0' },
         },
         required: ['name', 'yen'],
       },
@@ -881,6 +937,15 @@ const OCR_PROMPT = [
   '- 品名はレシートに印字されたとおりに写す。省略形も記号もそのまま。読めない文字は推測しない。',
   '- 購入日は yyyy-MM-dd。令和などの和暦は西暦に直す。年の印字がなければ空文字にする。',
   '- 品物が1つも読み取れなければ items は空配列にする。写っていないものを作らない。',
+  '',
+  '税について（金額の正確さに直結するので慎重に）:',
+  '- 「外税」「税抜」と書かれていたり、小計のあとに「外税8%」のように税額が',
+  '  別行で足されている場合は taxMode を「外税」にする。各行の金額は税抜のまま出す。',
+  '- 行の金額がすでに税込（「内税」「税込」表記、または小計＝合計）なら taxMode は「内税」。',
+  '- どちらとも判断できなければ「不明」。推測で決めない。',
+  '- 各行の税率は taxRate に入れる。「※」「軽」などの軽減税率マークが付いた食品は 8、',
+  '  マークのない品（酒・日用品など）は 10。判断できなければ 0。',
+  '- total にはレシートの支払合計（税込）を入れる。検算に使う。',
 ].join('\n');
 
 /** 品物ではない行。読み取り側が混ぜてきたときの保険 */
@@ -1019,16 +1084,18 @@ function looksLikeReceipt_(s) {
   } catch (e) { return false; }
 }
 
-/** 数値や日付の形をそろえ、品物でない行を落とす */
+/** 数値や日付の形をそろえ、品物でない行を落とし、金額を税込にそろえる */
 function cleanReceipt_(o) {
   const date = d2s_(String((o && o.date) || ''));
   const items = ((o && o.items) || []).map(function (it) {
     const qty = num_(it && it.qty);
+    const rate = num_(it && it.taxRate);
     return {
       name: String((it && it.name) || '').trim(),
       yen:  num_(it && it.yen),
       qty:  qty > 0 ? qty : 0,
       unit: String((it && it.unit) || '').trim(),
+      taxRate: (rate === 8 || rate === 10) ? rate : 0,
     };
   }).filter(function (it) {
     if (!it.name) return false;
@@ -1036,11 +1103,43 @@ function cleanReceipt_(o) {
     return !OCR_DROP.test(it.name.replace(/[\s　]/g, ''));
   });
 
+  const mode = String((o && o.taxMode) || '不明').trim();
+  const printedTotal = num_(o && o.total);
+  const beforeTax = items.reduce(function (a, x) { return a + x.yen; }, 0);
+  if (mode === '外税') addTax_(items);
+
   return {
     date:  /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : '',
     store: String((o && o.store) || '').trim(),
+    taxMode: mode,
+    printedTotal: r2_(printedTotal),
+    subtotal: r2_(beforeTax),
+    total: r2_(items.reduce(function (a, x) { return a + x.yen; }, 0)),
     items: items,
   };
+}
+
+/**
+ * 外税レシートの行を税込にそろえる。
+ * 日本の外税は「税率ごとの対象額の合計」に税をかけるので、
+ * 1行ずつ丸めて足すとレシートの合計と合わなくなる。
+ * 税率ごとにまとめて税額を出し、それを各行の金額比で配分する。
+ */
+function addTax_(items) {
+  const groups = {};
+  items.forEach(function (it) {
+    const r = (it.taxRate === 8 || it.taxRate === 10) ? it.taxRate : 8;  // 食品が主なので既定は8
+    (groups[r] = groups[r] || []).push(it);
+  });
+
+  Object.keys(groups).forEach(function (r) {
+    const rate = Number(r);
+    const rows = groups[r];
+    const base = rows.reduce(function (a, x) { return a + x.yen; }, 0);
+    if (!(base > 0)) return;
+    const tax = Math.floor(base * rate / 100);   // 多くの店が切り捨て
+    rows.forEach(function (x) { x.yen = r2_(x.yen + tax * x.yen / base); });
+  });
 }
 
 function ocrHttpError_(code, text) {
