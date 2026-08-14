@@ -273,6 +273,14 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .trio .inw input{height:44px;font-size:16px}
 .dupwarn{margin:-4px 0 12px;padding:10px 12px;border:1.5px solid var(--warn);background:var(--warn-tint);
   border-radius:12px;font-size:12px;line-height:1.7;color:var(--ink)}
+.taxrow{margin:2px 0 12px;padding:9px 11px;border:1.5px solid var(--line-2);border-radius:12px;background:var(--surface-2)}
+.taxrow.on{border-color:var(--accent);background:var(--accent-tint)}
+.taxrow .cb{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:var(--ink-2)}
+.taxrow .cb input{width:18px;height:18px;flex:none}
+.taxrow .perg{margin-top:6px}
+.taxnote{margin:0 0 10px;padding:10px 12px;border:1.5px solid var(--accent);background:var(--accent-tint);
+  border-radius:12px;font-size:12px;line-height:1.75}
+.taxnote.bad{border-color:var(--warn);background:var(--warn-tint)}
 
 .foot{position:fixed;left:0;right:0;bottom:calc(var(--tabh) + env(safe-area-inset-bottom));z-index:30;
   background:rgba(255,255,255,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
@@ -388,7 +396,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-12c';
+var APP_VERSION = '2026-08-12d';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -536,6 +544,7 @@ var S = {
   buyMode: 'lot', buyFood: null, buyQuery: '',
   buyDate: '', buyDateTouched: false,
   backfill: false, backfillDone: false,   // 記録を始める前に買った分を、残っている量だけで登録する
+  taxOut: false, taxRate: 8,              // 外税レシート（行の金額が税抜）かどうかと、その税率
   buyLog: [],
   expKind: '', expMeal: '',
   pickDay: null,
@@ -1482,6 +1491,7 @@ function buyPickHtml() {
               '<em class="src ' + (f.lastYen ? 'prev' : 'blank') + '">' + (f.lastYen ? '前回値' : '　') + '</em></label>' +
           '</div>' +
           '<div class="perg" id="bPerU">&nbsp;</div>' +
+          taxRowHtml('b') +
           backfillHtml(f) +
           '<button class="btn" id="bLotGo">登録する</button>' +
         '</div>' +
@@ -1545,6 +1555,21 @@ function backfillHtml(f) {
  * 同じ買い物を「在庫外支出」と「仕入→消費」の両方に入れると、
  * 同じお金が2回数えられてしまうため（登録は止めない。判断は本人がする）
  */
+/** 外税の切替と税率の共通処理。paint は「税込いくらになるか」の表示を更新する */
+function bindTaxRow(id, paint) {
+  var cb = $('#' + id + 'TaxOn');
+  if (cb) cb.onchange = function () { S.taxOut = this.checked; renderBuy(); };
+  var host = $('#v-buy');
+  host.querySelectorAll('[data-tr]').forEach(function (b) {
+    b.onclick = function () { S.taxRate = Number(b.dataset.tr); renderBuy(); };
+  });
+  if (paint) {
+    var src = $('#' + (id === 'b' ? 'bY' : 'oYen'));
+    if (src) { var prev = src.oninput; src.oninput = function (e) { if (prev) prev.call(this, e); paint(); }; }
+    paint();
+  }
+}
+
 function paintDupWarn(name) {
   var el = $('#oDup');
   if (!el) return;
@@ -1557,6 +1582,32 @@ function paintDupWarn(name) {
     (stock.length ? '（いま在庫あり）' : '') + '。<br>' +
     'これを在庫外支出に入れると、仕入と二重に数える可能性があります。' +
     '持ち帰って残るものなら「食材の仕入」へ、その場で食べ切ったものならこのままで大丈夫です。';
+}
+
+/**
+ * 外税レシートの切替。
+ * 行に印字された金額が税抜のとき、税を乗せて税込で登録するための欄。
+ * 内税のレシート（行がすでに税込）ではOFFのままでよい。
+ */
+function taxRowHtml(id) {
+  return '<div class="taxrow' + (S.taxOut ? ' on' : '') + '">' +
+    '<label class="cb"><input type="checkbox" id="' + id + 'TaxOn"' + (S.taxOut ? ' checked' : '') + '>' +
+      '入れた金額は<b>税抜</b>（外税レシート）</label>' +
+    (S.taxOut
+      ? '<div class="tags" style="margin-top:8px">' +
+          [8, 10].map(function (r) {
+            return '<button class="tag' + (S.taxRate === r ? ' on' : '') + '" data-tr="' + r + '">' + r + '%</button>';
+          }).join('') +
+        '</div><div class="perg" id="' + id + 'TaxOut">&nbsp;</div>'
+      : '') +
+  '</div>';
+}
+
+/** 税抜きの金額を税込にする。切替がOFFならそのまま */
+function withTax(yen) {
+  var y = Number(yen) || 0;
+  if (!S.taxOut) return y;
+  return Math.round(y * (1 + S.taxRate / 100) * 100) / 100;
 }
 
 function buyOutHtml() {
@@ -1572,6 +1623,7 @@ function buyOutHtml() {
     '<label class="fld"><span>店名・品名</span><div class="inw wide"><input id="oName" placeholder="例: 松屋 / 紙パックのジュース"></div></label>' +
     '<div class="dupwarn" id="oDup" hidden></div>' +
     '<label class="fld"><span>金額</span><div class="inw"><input id="oYen" inputmode="decimal" enterkeyhint="done"><i>円</i></div></label>' +
+    taxRowHtml('o') +
     '<div style="height:6px"></div>' +
     '<button class="btn" id="bOutGo">登録する</button>' +
     '<p class="tiny muted" style="margin:16px 2px 0;line-height:1.9">' +
@@ -1630,6 +1682,14 @@ function bindBuy() {
   var ef = $('#bEditFood');
   if (ef) ef.onclick = function () { showEditFood(S.buyFood); };
 
+  bindTaxRow('b', function () {
+    var el = $('#bTaxOut'); if (!el || !f) return;
+    var y = parseFloat(($('#bY') || {}).value);
+    el.innerHTML = (y > 0)
+      ? '税込 <b>' + yen(withTax(y)) + '</b> で登録します<span class="tiny" style="color:var(--ink-3)">（' + yen(y) + ' + ' + S.taxRate + '%）</span>'
+      : '&nbsp;';
+  });
+
   var bfOn = $('#bBackfill');
   if (bfOn) bfOn.onclick = function () { S.backfill = true; renderBuy(); };
   var bfOff = $('#bBackfillOff');
@@ -1664,7 +1724,7 @@ function bindBuy() {
 
   var go = $('#bLotGo');
   if (go) go.onclick = function () {
-    var qty = parseFloat($('#bQ').value), y = parseFloat($('#bY').value);
+    var qty = parseFloat($('#bQ').value), y = withTax(parseFloat($('#bY').value));
     if (!(qty > 0)) return toastErr('内容量を入れてください');
     if (!(y >= 0)) return toastErr('金額を入れてください');
     var date = ($('#bDate') || {}).value || todayStr();
@@ -1709,9 +1769,17 @@ function bindBuy() {
     $$('#oMeals .tag').forEach(function (c) { c.classList.toggle('on', c === b); });
   };
 
+  bindTaxRow('o', function () {
+    var el = $('#oTaxOut'); if (!el) return;
+    var v = parseFloat(($('#oYen') || {}).value);
+    el.innerHTML = (v > 0)
+      ? '税込 <b>' + yen(withTax(v)) + '</b> で登録します<span class="tiny" style="color:var(--ink-3)">（' + yen(v) + ' + ' + S.taxRate + '%）</span>'
+      : '&nbsp;';
+  });
+
   var og = $('#bOutGo');
   if (og) og.onclick = function () {
-    var y = parseFloat($('#oYen').value);
+    var y = withTax(parseFloat($('#oYen').value));
     if (!(y > 0)) return toastErr('金額を入れてください');
     var payload = {
       date: $('#oDate').value || todayStr(), kind: S.expKind,
@@ -1938,7 +2006,7 @@ function runOcr(files) {
   S.ocrBusy = { done: 0, total: files.length, err: '' };
   renderBuy();
 
-  var rows = [], failed = 0, lastErr = '';
+  var rows = [], failed = 0, lastErr = '', taxNotes = [];
 
   var step = function (i) {
     if (i >= files.length) return Promise.resolve();
@@ -1949,6 +2017,11 @@ function runOcr(files) {
         if (!r || !r.ok) { failed++; lastErr = (r && r.error) || '読み取れませんでした'; return; }
         var rc = r.receipt || {};
         rc.items.forEach(function (it) { rows.push(draftRow(it, rc)); });
+        taxNotes.push({
+          store: rc.store || '', date: rc.date || '',
+          mode: rc.taxMode || '不明', subtotal: rc.subtotal || 0,
+          total: rc.total || 0, printed: rc.printedTotal || 0,
+        });
       })
       .catch(function (e) { failed++; lastErr = (e && e.message) || '読み取れませんでした'; })
       .then(function () { return step(i + 1); });
@@ -1960,7 +2033,7 @@ function runOcr(files) {
       renderBuy();
       return toastErr(failed ? lastErr : 'レシートから品物を読み取れませんでした');
     }
-    S.draft = { rows: rows, sheets: files.length, failed: failed };
+    S.draft = { rows: rows, sheets: files.length, failed: failed, tax: taxNotes };
     renderBuy();
     window.scrollTo(0, 0);
     if (failed) toastErr(failed + '枚は読み取れませんでした：' + lastErr);
@@ -2005,7 +2078,7 @@ function draftHtml() {
     '<div class="dbar"><div class="in">' +
       '<b>レシート' + d.sheets + '枚から ' + d.rows.length + '件</b>' +
       '<button class="lnk" id="dCancel">やめる</button>' +
-    '</div></div>';
+    '</div></div>' + taxNoteHtml(d);
 
   var body = order.map(function (date) {
     var store = (byDate[date][0] || {}).store || '';
@@ -2027,6 +2100,38 @@ function draftHtml() {
     '<div style="height:10px"></div>' +
     '<p class="tiny muted" style="margin:0 2px;line-height:1.8">登録した行の由来は「レシート読取」になります。' +
     '手入力ぶんとは仕入シートで見分けられます。</p>';
+}
+
+/**
+ * 読み取った税の扱いを見せる。金額の正確さに直結するので、
+ * 「税込に直したのか」「レシートの合計と合っているか」を登録前に確認できるようにする。
+ */
+function taxNoteHtml(d) {
+  var notes = d.tax || [];
+  if (!notes.length) return '';
+  return notes.map(function (t) {
+    var head = (t.store ? esc(t.store) + '　' : '') + (t.date ? fmtMD(t.date) : '');
+    if (t.mode === '外税') {
+      var diff = t.printed ? Math.round((t.total - t.printed) * 100) / 100 : 0;
+      var okAll = t.printed && Math.abs(diff) <= 2;   // 端数の丸めぶんは許容
+      return '<div class="taxnote' + (okAll || !t.printed ? '' : ' bad') + '">' +
+        '<b>外税のレシートでした</b>' + (head ? '（' + head + '）' : '') + '<br>' +
+        '税抜 ' + yen(t.subtotal) + ' → <b>税込 ' + yen(t.total) + '</b> に直して並べています。' +
+        (t.printed
+          ? (okAll
+              ? '<br>レシートの合計 ' + yen(t.printed) + ' と一致しました。'
+              : '<br><b>レシートの合計 ' + yen(t.printed) + ' と ' + yen(Math.abs(diff)) +
+                ' ずれています。</b>金額を確かめてください（読み落とした行があるかもしれません）。')
+          : '') +
+      '</div>';
+    }
+    if (t.mode === '内税') {
+      return '<div class="taxnote">行の金額がすでに税込のレシートでした' + (head ? '（' + head + '）' : '') +
+             '。そのまま並べています。</div>';
+    }
+    return '<div class="taxnote bad">税込か税抜かを読み取れませんでした' + (head ? '（' + head + '）' : '') +
+           '。<b>金額はレシートの印字のまま</b>です。外税なら手で直してください。</div>';
+  }).join('');
 }
 
 function draftRowHtml(r) {
@@ -2254,7 +2359,7 @@ function submitDraft() {
     if (!res || !res.ok) throw new Error((res && res.error) || '登録できませんでした');
     var n = rows.length;
     var left = S.draft.rows.filter(function (r) { return r.keep && !(r.qty > 0); });
-    S.draft = left.length ? { rows: left, sheets: S.draft.sheets, failed: 0 } : null;
+    S.draft = left.length ? { rows: left, sheets: S.draft.sheets, failed: 0, tax: S.draft.tax } : null;
     return refresh(true).then(function () {
       renderBuy();
       toast(n + '件を登録しました' + (left.length ? '（内容量が空の' + left.length + '件は残しました）' : ''));
