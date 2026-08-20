@@ -320,9 +320,10 @@ function apiBootstrap_(p) {
     return o;
   });
 
+  const nameById = foodNameMap_(foods);
   const stock = lots
     .filter(function (l) { return String(l['状態']) === '在庫あり' && num_(l['残量']) > 0; })
-    .map(lotOut_);
+    .map(function (l) { return lotOut_(l, nameById); });
 
   return {
     ok: true,
@@ -772,6 +773,8 @@ function buildDay_(date) {
   const meals = { '朝': 0, '昼': 0, '夕': 0, '間食': 0, '': 0 };
   let total = 0;
 
+  const dayNameById = foodNameMap_();
+
   readAll_('cons').forEach(function (c) {
     if (d2s_(c['日付'] || String(c['日時']).slice(0, 10)) !== d0) return;
     const kind = String(c['種別']);
@@ -781,7 +784,7 @@ function buildDay_(date) {
     if (counted) { total += yen; meals[meal in meals ? meal : ''] += yen; }
     items.push({
       time: String(c['日時']).slice(11, 16),
-      name: String(c['品名']),
+      name: dayNameById[String(c['食材ID'])] || String(c['品名']),
       qty: num_(c['使用量']),
       unit: String(c['単位'] || ''),
       yen: r2_(yen),
@@ -952,6 +955,31 @@ const OCR_PROMPT = [
 const OCR_DROP = /^(小計|合計|総合計|課税|非課税|税|外税|内税|消費税|お預り|預り|お釣|釣銭|釣り|現金|クレジット|カード|電子マネー|チャージ|ポイント|値引|割引|クーポン|レジ|責任者|点数|買上|お買上|領収|登録番号|№|No)/;
 
 /**
+ * レシートの品名から、店の商品コードや飾り記号を落とす。
+ *   「0073DP＊【キャベツ】」→「キャベツ」
+ *   「0031DP＊純粋はちみつ２５０」→「純粋はちみつ２５０」
+ * 落としすぎて何か分からなくなるくらいなら、元のまま返す方を選ぶ。
+ * 元の表記は表記ゆれとして別に覚えるので、次に同じ店のレシートを読んでも突き合う。
+ */
+function tidyItemName_(s) {
+  const src = String(s || '').trim();
+  if (!src) return '';
+
+  let t = src;
+  // 先頭の商品コード（0073DP＊ / 12345* / 0031DP※ など）。
+  // 区切りの＊や※が無いものは、商品名の一部かもしれないので触らない。
+  t = t.replace(/^[0-9\uFF10-\uFF19]{2,8}[\s\u3000]*[A-Za-z\uFF21-\uFF3A\uFF41-\uFF5A]{0,6}[\s\u3000]*[\uFF0A*\u203B][\s\u3000]*/, '');
+  // 先頭に残る軽減税率などの印
+  t = t.replace(/^[\uFF0A*\u203B][\s\u3000]*/, '');
+  // 飾りの角括弧（中身は残す）
+  t = t.replace(/[\u3010\u3011\[\]]/g, '');
+  t = t.replace(/[\s\u3000]+/g, ' ').trim();
+
+  return t ? t : src;
+}
+
+
+/**
  * 表記ゆれ列に1つ足す。足す必要がなければ null を返す。
  * 品名そのもの・すでに入っている表記・空文字は足さない。
  */
@@ -1090,8 +1118,10 @@ function cleanReceipt_(o) {
   const items = ((o && o.items) || []).map(function (it) {
     const qty = num_(it && it.qty);
     const rate = num_(it && it.taxRate);
+    const raw = String((it && it.name) || '').trim();
     return {
-      name: String((it && it.name) || '').trim(),
+      name: tidyItemName_(raw),
+      raw:  raw,
       yen:  num_(it && it.yen),
       qty:  qty > 0 ? qty : 0,
       unit: String((it && it.unit) || '').trim(),
@@ -1250,12 +1280,25 @@ function findRow_(sh, colNo, value) {
   return -1;
 }
 
-function lotOut_(l) {
+/**
+ * 画面に出す品名は食材マスタを正とする。
+ * 仕入・消費に控えてある品名は「そのとき何と印字されていたか」の記録なので、
+ * 食材マスタで名前を直したら、過去のぶんもまとめて直った名前で出したい。
+ * （食材マスタに無い場合だけ、控えの品名にそのまま頼る）
+ */
+function foodNameMap_(foods) {
+  const m = {};
+  (foods || readAll_('foods')).forEach(function (f) { m[String(f['食材ID'])] = String(f['品名']); });
+  return m;
+}
+
+function lotOut_(l, nameById) {
+  const fid = String(l['食材ID']);
   return {
     id: String(l['ロットID']),
     date: d2s_(l['日付']),
-    foodId: String(l['食材ID']),
-    name: String(l['品名']),
+    foodId: fid,
+    name: (nameById && nameById[fid]) || String(l['品名']),
     unit: String(l['単位'] || 'g'),
     qty: num_(l['内容量']),
     yen: num_(l['金額']),
