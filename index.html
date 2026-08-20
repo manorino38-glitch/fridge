@@ -396,7 +396,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-12d';
+var APP_VERSION = '2026-08-20a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -2047,7 +2047,9 @@ function draftRow(it, rc) {
   var unit = it.unit && S.units.indexOf(it.unit) >= 0 ? it.unit : '';
   return {
     key: 'd' + (++DRAFT_SEQ),
-    raw: String(it.name || ''),
+    // raw はレシートに印字されたままの文字列。表記ゆれとして覚えてもらう用。
+    // 画面と登録に使うのは、店の商品コードを落としたあとの name のほう。
+    raw: String(it.raw || it.name || ''),
     foodId: f ? f.id : null,
     name: f ? f.name : String(it.name || ''),
     category: f ? f.category : (S.categories[0] || '冷蔵'),
@@ -2137,11 +2139,13 @@ function taxNoteHtml(d) {
 function draftRowHtml(r) {
   var isNew = !r.foodId;
   var cls = 'drow' + (r.keep ? '' : ' off') + (isNew && r.keep ? ' new' : '');
+  // レシートの印字と手元の呼び方が違うときは、印字のほうも見せておく
+  var printed = normalizeName(r.raw) === normalizeName(r.name)
+    ? ''
+    : '<span class="hit">' + esc(r.raw) + '</span> として印字　';
   var sub = isNew
-    ? '<span class="tagnew">新しい食材</span>　品名をタップすると既存の食材に結べます'
-    : (normalizeName(r.raw) === normalizeName(r.name)
-        ? esc(r.category)
-        : '<span class="hit">' + esc(r.raw) + '</span> として印字　' + esc(r.category));
+    ? '<span class="tagnew">新しい食材</span>　' + printed + '品名をタップすると既存の食材に結べます'
+    : printed + esc(r.category);
 
   var opts = function (list, cur) {
     return list.map(function (x) {
@@ -2150,7 +2154,7 @@ function draftRowHtml(r) {
   };
 
   return '<div class="' + cls + '" data-drow="' + r.key + '">' +
-    '<div class="t"><b data-dpick="' + r.key + '">' + esc(isNew ? r.raw : r.name) + '</b>' +
+    '<div class="t"><b data-dpick="' + r.key + '">' + esc(r.name) + '</b>' +
       '<span class="y">' + yen(r.yen) + '</span>' +
       '<button class="x" data-dtoggle="' + r.key + '">' + (r.keep ? '除外' : '戻す') + '</button></div>' +
     '<div class="m">' + sub + (r.qtyFrom ? '　<span class="muted">内容量: ' + r.qtyFrom + '</span>' : '') + '</div>' +
@@ -2332,11 +2336,11 @@ function submitDraft() {
   var makeNext = function (i) {
     if (i >= news.length) return Promise.resolve();
     var r = news[i];
-    var k = normalizeName(r.raw);
+    var k = normalizeName(r.name);
     if (made[k]) { r.foodId = made[k]; return makeNext(i + 1); }
-    return call('addFood', { name: r.raw, category: r.category, unit: r.unit, tracked: true }, opId())
+    return call('addFood', { name: r.name, category: r.category, unit: r.unit, tracked: true }, opId())
       .then(function (res) {
-        if (!res || !res.ok) throw new Error((res && res.error) || (r.raw + ' を登録できませんでした'));
+        if (!res || !res.ok) throw new Error((res && res.error) || (r.name + ' を登録できませんでした'));
         made[k] = res.food.id;
         r.foodId = res.food.id;
         if (!foodById(res.food.id)) S.foods.push(res.food);
