@@ -227,6 +227,20 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .mealseg button.on{background:var(--surface);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.13)}
 .mealseg.dim{opacity:.4;pointer-events:none}
 
+.catchips{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  padding:2px 3px 10px;margin:0 -3px;scrollbar-width:none}
+.catchips::-webkit-scrollbar{display:none}
+.catchips button{flex:none;display:flex;align-items:center;gap:6px;height:34px;padding:0 12px;
+  border:1px solid var(--line);border-radius:99px;background:var(--surface);
+  font-size:13px;font-weight:700;color:var(--ink-2);white-space:nowrap}
+.catchips button .dot{width:8px;height:8px;border-radius:2px;flex:none}
+.catchips button .ct{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.catchips button.on{border-color:var(--accent);color:var(--accent);background:var(--accent-tint)}
+.catchips button.on .ct{color:var(--accent)}
+.catchips button.zero{opacity:.45}
+.pickmore{font-size:12px;color:var(--ink-3);margin:0 3px 8px}
+.pickmore button{font-size:12px;font-weight:800;color:var(--accent);text-decoration:underline}
+
 .catbar{display:flex;align-items:center;gap:7px;margin:20px 3px 7px}
 .catbar .dot{width:10px;height:10px;border-radius:3px;flex:none}
 .catbar .nm{font-size:12px;font-weight:800;letter-spacing:.08em;color:var(--ink-2)}
@@ -396,7 +410,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-20a';
+var APP_VERSION = '2026-08-20b';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -541,7 +555,7 @@ var S = {
   recDate: '', recDateTouched: false,   // 冷蔵庫タブの記録日。既定は今日
   ent: {}, kind: {}, sel: {}, open: null,
   makePrep: false,
-  buyMode: 'lot', buyFood: null, buyQuery: '',
+  buyMode: 'lot', buyFood: null, buyQuery: '', buyCat: '',
   buyDate: '', buyDateTouched: false,
   backfill: false, backfillDone: false,   // 記録を始める前に買った分を、残っている量だけで登録する
   taxOut: false, taxRate: 8,              // 外税レシート（行の金額が税抜）かどうかと、その税率
@@ -1461,14 +1475,57 @@ function buyLotHtml() {
 
 function buyPickHtml() {
   var q = S.buyQuery.trim();
-  var list = S.foods.filter(function (f) { return f.category !== '作り置き'; });
-  if (q) list = list.filter(function (f) { return f.name.indexOf(q) >= 0 || (f.aliases || '').indexOf(q) >= 0; });
+  var all = S.foods.filter(function (f) { return f.category !== '作り置き'; });
+
+  // 絞り込みを先にかける。置き場ごとの件数は、絞り込んだあとの数を出したい
+  var hits = q
+    ? all.filter(function (f) { return f.name.indexOf(q) >= 0 || (f.aliases || '').indexOf(q) >= 0; })
+    : all;
+
+  // 置き場の並びは食材の有無で変えない（探すたびにタブが動くと押しにくい）
+  var cats = S.categories.filter(function (c) {
+    return c !== '作り置き' && all.some(function (f) { return f.category === c; });
+  });
+  all.forEach(function (f) {   // 設定に無い置き場が混ざっていても拾う
+    if (f.category && cats.indexOf(f.category) < 0) cats.push(f.category);
+  });
+  if (S.buyCat && cats.indexOf(S.buyCat) < 0) S.buyCat = '';
+
+  var countIn = function (c) {
+    return hits.filter(function (f) { return f.category === c; }).length;
+  };
+  var chips = '<div class="catchips" id="buyCats">' +
+    '<button data-bcat=""' + (S.buyCat ? '' : ' class="on"') + '>すべて' +
+      '<span class="ct">' + hits.length + '</span></button>' +
+    cats.map(function (c) {
+      var n = countIn(c);
+      var cls = (S.buyCat === c ? ' on' : '') + (n ? '' : ' zero');
+      return '<button data-bcat="' + esc(c) + '"' + (cls ? ' class="' + cls.trim() + '"' : '') + '>' +
+        '<span class="dot" style="background:' + catColor(c) + '"></span>' +
+        esc(c) + '<span class="ct">' + n + '</span></button>';
+    }).join('') + '</div>';
+
+  var list = S.buyCat ? hits.filter(function (f) { return f.category === S.buyCat; }) : hits;
   list.sort(function (a, b) {
     var x = a.lastBuy || '', y = b.lastBuy || '';
     if (x !== y) return x > y ? -1 : 1;
     return String(a.name).localeCompare(String(b.name), 'ja');
   });
+
+  // ほかの置き場に取りこぼしがあるなら、黙って隠さずに教える
+  var elsewhere = hits.length - list.length;
+  var note = '';
+  if (S.buyCat && elsewhere > 0) {
+    note = '<div class="pickmore">ほかの置き場にも ' + elsewhere + ' 件　' +
+           '<button data-bcat="">すべて見る</button></div>';
+  }
+
+  var total = list.length;
   list = list.slice(0, 60);
+  if (total > list.length) {
+    note += '<div class="pickmore">上から ' + list.length + ' 件だけ出しています' +
+            '（あと ' + (total - list.length) + ' 件。絞り込みを使ってください）</div>';
+  }
 
   var f = S.buyFood ? foodById(S.buyFood) : null;
   var panel = '';
@@ -1506,6 +1563,7 @@ function buyPickHtml() {
     dateFieldHtml('bDate', '購入日（過去の日付も入れられます）') +
     '<div class="sect"><h2>食材</h2><div class="rule"></div><span class="hint">最近買った順</span></div>' +
     '<label class="fld"><div class="inw wide"><input id="bQuery" type="search" placeholder="絞り込み" value="' + esc(S.buyQuery) + '" autocapitalize="off"></div></label>' +
+    '<div id="buyFilter">' + chips + note + '</div>' +
     (list.length
       ? '<div class="rows" id="pickRows">' + list.map(function (x) {
           return '<button class="prow' + (x.id === S.buyFood ? ' on' : '') + '" data-food="' + esc(x.id) + '">' +
@@ -1649,6 +1707,17 @@ function bindBuy() {
   if (seg) seg.onclick = function (e) {
     var b = e.target.closest('[data-bm]'); if (!b) return;
     S.buyMode = b.dataset.bm; renderBuy();
+  };
+
+  // 置き場の切り替え。押した位置が動かないよう、横スクロール量は持ち越す
+  var bf = $('#buyFilter');
+  if (bf) bf.onclick = function (e) {
+    var b = e.target.closest('[data-bcat]'); if (!b) return;
+    var bar = $('#buyCats');
+    var left = bar ? bar.scrollLeft : 0;
+    S.buyCat = b.dataset.bcat;
+    renderBuy();
+    var n = $('#buyCats'); if (n) n.scrollLeft = left;
   };
 
   var q = $('#bQuery');
@@ -1906,7 +1975,7 @@ function showFoodSheet(foodId) {
         $('#nGo').disabled = false;
         if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
         if (!foodById(r.food.id)) S.foods.push(r.food);
-        S.buyFood = r.food.id; S.buyQuery = '';
+        S.buyFood = r.food.id; S.buyQuery = ''; S.buyCat = '';
         closeSheet(); renderBuy(); window.scrollTo(0, 0);
         toast(r.duplicated ? '同じ品名がすでにありました' : name + ' を追加しました');
       });
