@@ -185,6 +185,36 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .kv .v{font-size:15px;font-weight:700;white-space:nowrap}
 
 .chart{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.cal .wd{font-size:10px;font-weight:800;text-align:center;color:var(--ink-3);padding-bottom:2px}
+.cal .wd.sun{color:#c0392b}
+.cal .wd.sat{color:#2a78d6}
+.cal .c{min-height:48px;border-radius:9px;background:var(--surface-2);border:1px solid var(--line);
+  padding:4px 5px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;
+  overflow:hidden;text-align:left}
+.cal .c.pad{background:transparent;border-color:transparent;min-height:0}
+.cal .c .d{font-size:10px;font-weight:700;color:var(--ink-3);font-variant-numeric:tabular-nums;line-height:1}
+.cal .c .a{font-size:11px;font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums;
+  line-height:1;letter-spacing:-.03em}
+.cal .c .a.z{color:var(--line-2);font-weight:600}
+.cal .c.today{box-shadow:inset 0 0 0 2px var(--accent-2)}
+.cal .c.today .d{color:var(--accent);font-weight:800}
+.cal .c.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-tint)}
+.cal .c.fut{opacity:.4}
+.calfoot{display:flex;justify-content:space-between;gap:10px;margin-top:9px;font-size:11px;color:var(--ink-3)}
+.calfoot b{color:var(--ink-2);font-weight:800}
+
+.copyhd{font-size:11px;font-weight:800;letter-spacing:.06em;color:var(--ink-3);margin:16px 0 6px}
+.copyrow{display:flex;gap:6px;flex-wrap:nowrap}
+.copyrow button{flex:1 1 0;min-width:0;height:38px;border:1.5px solid var(--line-2);border-radius:11px;
+  font-size:13px;font-weight:700;background:var(--surface);color:var(--ink-2);white-space:nowrap}
+.copyrow button.wide{flex:1.5 1 0}
+.copyrow button:disabled{opacity:.35}
+.copyrow button:not(:disabled):active{background:var(--accent-tint);border-color:var(--accent);color:var(--accent)}
+.copybox{width:100%;height:190px;border:1px solid var(--line);border-radius:11px;padding:11px;
+  font-size:14px;line-height:1.75;background:var(--surface-2);color:var(--ink);resize:none;
+  font-family:inherit;-webkit-user-select:text;user-select:text}
+
 .bars{display:flex;align-items:flex-end;gap:2px;height:88px}
 .bars > div{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
 .bars b{display:block;width:100%;max-width:14px;border-radius:4px 4px 0 0;background:#bcd9cc;box-shadow:0 0 0 2px var(--surface)}
@@ -410,7 +440,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-20b';
+var APP_VERSION = '2026-08-22a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -863,8 +893,8 @@ function renderSummary() {
       (s.byMeal && s.byMeal['未分類'] ? '<div class="kv"><span class="k">食事区分なし</span><span class="v num">' + yen(s.byMeal['未分類']) + '</span></div>' : '') +
     '</div>' +
 
-    '<div class="sect"><h2>日ごと</h2><div class="rule"></div><span class="hint">棒をタップ</span></div>' +
-    '<div class="chart">' + barsHtml(s) + '</div>' +
+    '<div class="sect"><h2>日ごと</h2><div class="rule"></div><span class="hint">日付をタップ</span></div>' +
+    '<div class="chart">' + calHtml(s) + '</div>' +
 
     '<div style="margin-top:20px;display:grid;gap:9px">' +
       '<button class="btn line" id="bRefresh">最新に更新</button>' +
@@ -924,7 +954,93 @@ function todayHtml() {
              '<span class="v num">' + yen(d ? d.total : 0) + '</span></div>' +
            '<div class="mealrow">' + tiles + '</div>' +
            list +
+           copyRowHtml(d) +
          '</div>';
+}
+
+/* ---- あすけんの文章入力へ持っていくためのテキスト ------------------------
+ * 品名と量を1行ずつ並べるだけ。あちらのAIがこの形をそのまま読める。
+ * 食べていないもの（廃棄・調整・作り置きへの振替）は入れない。
+ * 在庫外支出（外食など）は量が無いので品名だけ入れる。
+ * ------------------------------------------------------------------------*/
+var ASKEN_MEAL = { '朝': '朝食', '昼': '昼食', '夕': '夕食', '間食': '間食', '': 'その他' };
+
+function askenLines(d, meal) {
+  if (!d || !d.items) return [];
+  var rows = [], byKey = {};
+
+  d.items.forEach(function (x) {
+    if (!x.counted) return;
+    if (meal !== '*' && (x.meal || '') !== meal) return;
+
+    // 作り置きの単位は「全体の何%か」。あすけんに渡しても意味がないので量は書かない
+    var unit = (x.unit === '%') ? '' : (x.unit || '');
+    var qty = (x.unit === '%') ? 0 : (Number(x.qty) || 0);
+
+    // 同じものを別のロットから取った日は1行にまとめる（玉ねぎ 100g + 4g → 104g）
+    var key = x.name + '\u0000' + unit;
+    if (byKey[key]) { byKey[key].qty += qty; return; }
+    byKey[key] = { name: x.name, unit: unit, qty: qty };
+    rows.push(byKey[key]);
+  });
+
+  return rows.map(function (r) {
+    return r.qty > 0 ? r.name + ' ' + fmtQty(r.qty, r.unit) : r.name;
+  });
+}
+
+function askenText(meal) {
+  var d = dayView();
+  if (meal !== '*') return askenLines(d, meal).join('\n');
+  // 1日ぶんは食事ごとに見出しを付ける（あすけん側の呼び方に合わせる）
+  return ['朝', '昼', '夕', '間食', ''].map(function (k) {
+    var lines = askenLines(d, k);
+    return lines.length ? ASKEN_MEAL[k] + '\n' + lines.join('\n') : '';
+  }).filter(Boolean).join('\n\n');
+}
+
+function copyRowHtml(d) {
+  var any = askenLines(d, '*').length;
+  if (!any) return '';
+  var btns = ['朝', '昼', '夕', '間食'].map(function (k) {
+    var n = askenLines(d, k).length;
+    return '<button data-cp="' + k + '"' + (n ? '' : ' disabled') + '>' + k + '</button>';
+  }).join('');
+  return '<div class="copyhd">あすけんへコピー</div>' +
+         '<div class="copyrow">' + btns +
+           '<button class="wide" data-cp="*">1日ぶん</button>' +
+         '</div>';
+}
+
+function copyMeal(meal) {
+  var txt = askenText(meal);
+  if (!txt) return toastErr('コピーするものがありません');
+  copyText(txt, meal === '*' ? fmtMD(dayKey()) + 'の1日ぶん' : ASKEN_MEAL[meal]);
+}
+
+function copyText(txt, label) {
+  var ok = function () { toast(label + 'をコピーしました'); };
+  var ng = function () { showCopyBox(txt, label); };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(ok, ng);
+      return;
+    }
+  } catch (e) {}
+  ng();
+}
+
+/** 自動コピーが効かない端末向け。選んだ状態で出して、手で写せるようにする */
+function showCopyBox(txt, label) {
+  openSheet('<h3>' + esc(label) + '</h3>' +
+    '<p class="tiny muted" style="margin:0 0 10px;line-height:1.7">' +
+      'この端末では自動コピーができませんでした。長押しして選んでください。</p>' +
+    '<textarea class="copybox" id="cpBox" readonly>' + esc(txt) + '</textarea>' +
+    '<button class="btn line" id="cpClose" style="margin-top:12px">閉じる</button>');
+  var b = document.getElementById('cpBox');
+  if (b) { try { b.focus(); b.setSelectionRange(0, b.value.length); } catch (e) {} }
+  var c = document.getElementById('cpClose');
+  if (c) c.onclick = closeSheet;
 }
 
 /** 8月11日（火）。今日と昨日は言葉でも出す */
@@ -938,30 +1054,55 @@ function fmtDayLabel(key) {
 }
 
 /** 日別の棒。1系列なので凡例は不要。タップでその日の内訳を出す */
-function barsHtml(s) {
+/**
+ * 1ヶ月の食費をカレンダーで見せる。
+ * 高い日／安い日が並びで分かるように、金額そのものと色の濃さの両方を出す。
+ * 色だけだと細かい差が読めず、数字だけだと山がどこか分からないので両方いる。
+ * 日付をタップすると、下の明細がその日に切り替わる。
+ */
+function calHtml(s) {
   var y = Number(s.ym.slice(0, 4)), m = Number(s.ym.slice(5, 7));
   var dim = new Date(y, m, 0).getDate();
-  var isCur = s.ym === todayStr().slice(0, 7);
-  var days = isCur ? Number(todayStr().slice(8, 10)) : dim;
-  var vals = [], max = 0;
-  for (var d = 1; d <= days; d++) {
-    var key = s.ym + '-' + pad(d);
-    var v = s.byDate && s.byDate[key] ? s.byDate[key].total : 0;
-    vals.push(v); if (v > max) max = v;
+  var today = todayStr();
+
+  var max = 0, sum = 0, n = 0, topKey = '';
+  for (var d = 1; d <= dim; d++) {
+    var k = s.ym + '-' + pad(d);
+    var v = s.byDate && s.byDate[k] ? s.byDate[k].total : 0;
+    if (v > max) { max = v; topKey = k; }
+    if (v > 0) { sum += v; n++; }
   }
   if (!max) return '<div class="empty">まだ記録がありません</div>';
 
-  var bars = vals.map(function (v, i) {
-    var day = i + 1;
-    var key = s.ym + '-' + pad(day);
-    var h = v > 0 ? Math.max(3, Math.round(v / max * 74)) : 2;
-    var cls = (key === todayStr()) ? ' today' : (S.pickDay === key ? ' on' : '');
-    var lab = (day === 1 || day % 5 === 0) ? day : '';
-    return '<div data-day="' + key + '"><b class="' + cls.trim() + '" style="height:' + h + 'px"></b>' +
-           '<em>' + lab + '</em></div>';
+  var head = ['日', '月', '火', '水', '木', '金', '土'].map(function (w, i) {
+    return '<div class="wd' + (i === 0 ? ' sun' : (i === 6 ? ' sat' : '')) + '">' + w + '</div>';
   }).join('');
 
-  return '<div class="bars" id="bars">' + bars + '</div>' +
+  var cells = '';
+  var first = new Date(y, m - 1, 1).getDay();
+  for (var i = 0; i < first; i++) cells += '<div class="c pad"></div>';
+
+  for (var d2 = 1; d2 <= dim; d2++) {
+    var key = s.ym + '-' + pad(d2);
+    var v2 = s.byDate && s.byDate[key] ? s.byDate[key].total : 0;
+    var future = key > today;
+    var cls = 'c' + (key === today ? ' today' : '') + (key === S.pickDay ? ' on' : '') + (future ? ' fut' : '');
+    // 濃くしすぎると数字が読めなくなるので、上限は控えめにする
+    var a = v2 > 0 ? (0.06 + 0.26 * (v2 / max)) : 0;
+    var amt = future ? ''
+      : (v2 > 0 ? '<span class="a">' + Math.round(v2).toLocaleString('ja-JP') + '</span>'
+                : '<span class="a z">—</span>');
+    cells += '<button class="' + cls + '" data-day="' + key + '"' + (future ? ' disabled' : '') +
+      (a ? ' style="background:rgba(22,107,78,' + a.toFixed(3) + ')"' : '') + '>' +
+      '<span class="d">' + d2 + '</span>' + amt + '</button>';
+  }
+
+  var foot = '<div class="calfoot">' +
+    '<span>記録のある日 <b>' + n + '日</b>　平均 <b>' + yen(n ? sum / n : 0) + '</b></span>' +
+    '<span>最高 ' + esc(fmtMD(topKey)) + ' <b>' + yen(max) + '</b></span>' +
+    '</div>';
+
+  return '<div class="cal" id="cal">' + head + cells + '</div>' + foot +
          '<div class="read" id="dayRead"></div>';
 }
 
@@ -1022,6 +1163,9 @@ $('#v-summary').addEventListener('click', function (e) {
   var dmv = e.target.closest('[data-dmv]');
   if (dmv && !dmv.disabled) { showDay(shiftDayKey(dayKey(), Number(dmv.dataset.dmv))); return; }
   if (e.target.id === 'dToday') { showDay(todayStr()); return; }
+
+  var cp = e.target.closest('[data-cp]');
+  if (cp && !cp.disabled) { copyMeal(cp.dataset.cp); return; }
 
   var bar = e.target.closest('[data-day]');
   if (bar) {
