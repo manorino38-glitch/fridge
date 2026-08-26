@@ -440,7 +440,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-22a';
+var APP_VERSION = '2026-08-26a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1341,6 +1341,8 @@ function rowHtml(foodId, lots, cat) {
   var name = (f && f.name) || lot.name;
   var unit = lot.unit || (f && f.unit) || 'g';
   var isPrep = (cat === '作り置き');
+  // 作り置きでも、食数で持っているものは数量欄を出す（「1食」と入れたい）
+  var isPct = isPrep && unit === '%';
   var pctLeft = lot.qty ? Math.round(lot.remain / lot.qty * 100) : 0;
 
   var q = S.ent[lot.id] || 0;
@@ -1351,9 +1353,12 @@ function rowHtml(foodId, lots, cat) {
   var isAll = q > 0 && Math.abs(q - lot.remain) < 0.005;
 
   // 作り置きは内容量100の%管理。数量欄を出しても%と同じ数字になるので%だけにする
-  var sub = isPrep
+  var sub = isPct
     ? (fmtMD(lot.date) + '作成 · ' + yen(lot.yen) + ' · 残り' + pctLeft + '%')
-    : ('残り' + pctLeft + '% · ' + fmtQty(lot.remain, unit) + ' · ' + fmtUnitPrice(lot.perU, unit));
+    : (isPrep
+        ? (fmtMD(lot.date) + '作成 · ' + yen(lot.yen) + ' · 残り' + fmtQty(lot.remain, unit) +
+           ' · ' + fmtUnitPrice(lot.perU, unit))
+        : ('残り' + pctLeft + '% · ' + fmtQty(lot.remain, unit) + ' · ' + fmtUnitPrice(lot.perU, unit)));
   if (q > 0 && isWaste) sub = '捨てた分として引きます · ' + sub;
   if (q > 0 && isAdj)   sub = '数を合わせるだけ（食費に入れない） · ' + sub;
 
@@ -1361,13 +1366,13 @@ function rowHtml(foodId, lots, cat) {
   var open = S.open === foodId;
 
   var row =
-    '<div class="row' + (isPrep ? ' prep' : '') + (q > 0 ? ' act' : '') +
+    '<div class="row' + (isPct ? ' prep' : '') + (q > 0 ? ' act' : '') +
       (isWaste && q > 0 ? ' waste' : '') + (isAdj && q > 0 ? ' adj' : '') +
       '" data-food="' + esc(foodId) + '" data-lot="' + esc(lot.id) + '">' +
       '<button class="nm" data-act="detail"><span class="t">' + esc(name) + badge + '</span>' +
         '<span class="s">' + esc(sub) + '</span></button>' +
       '<label class="qin"><input inputmode="decimal" enterkeyhint="done" data-k="pct" value="' + pctVal + '"><i>%</i></label>' +
-      (isPrep ? '' :
+      (isPct ? '' :
       '<label class="qin"><input inputmode="decimal" enterkeyhint="done" data-k="q" value="' + qVal + '"><i>' + esc(unit) + '</i></label>') +
       '<button class="allb' + (isAll ? ' on' : '') + '" data-act="all">全</button>' +
     '</div>';
@@ -1518,26 +1523,31 @@ function doRecord() {
       '<p class="small muted" style="margin:-8px 0 16px;line-height:1.8">材料 ' + p.length + '件・' + yen1(cost) + ' 分をひとつの在庫にします。' +
       'この分は今日の食費には計上されず、食べた日に計上されます。</p>' +
       '<label class="fld"><span>品名</span><div class="inw wide"><input id="pName" placeholder="カレー" autocapitalize="off"></div></label>' +
-      '<div style="height:6px"></div><button class="btn" id="pGo">作る</button>'
+      '<label class="fld"><span>何食ぶんできた？（任意）</span>' +
+        '<div class="inw"><input id="pServ" inputmode="numeric" placeholder="4"><i>食</i></div></label>' +
+      '<p class="tiny muted" style="margin:2px 0 0;line-height:1.7">' +
+        '入れておくと、冷蔵庫に「残り3食」と出ます。空のままなら全体を100%として持ちます。</p>' +
+      '<div style="height:12px"></div><button class="btn" id="pGo">作る</button>'
     );
     setTimeout(function () { $('#pName').focus(); }, 100);
     $('#pGo').onclick = function () {
       var n = $('#pName').value.trim();
       if (!n) return;
-      closeSheet(); send(p, n);
+      var sv = Number($('#pServ').value) || 0;
+      closeSheet(); send(p, n, sv > 0 ? sv : 0);
     };
     return;
   }
   send(p, '');
 }
 
-function send(p, prepName) {
+function send(p, prepName, prepServings) {
   var recMeal = S.meal;              // 記録後に自動判定へ戻すので、表示用に控えておく
   var payload = {
     meal: recMeal,
     // 今日ならいまの時刻。過去日ならその食事区分に合う時刻を入れて、一覧の並び順を保つ
     datetime: recIsToday() ? nowStr() : (recDate() + ' ' + mealTime(recMeal)),
-    makePrep: !!prepName, prepName: prepName,
+    makePrep: !!prepName, prepName: prepName, prepServings: prepServings || 0,
     entries: p.map(function (x) { return { lotId: x.lotId, qty: x.qty, kind: x.kind }; }),
   };
   var oid = opId();
@@ -1551,9 +1561,11 @@ function send(p, prepName) {
   });
   var localCost = p.reduce(function (a, x) { return a + x.qty * x.lot.perU; }, 0);
   if (prepName) {
-    S.lots.push({ id: 'tmp' + oid, date: recDate(), foodId: 'tmp' + oid, name: prepName, unit: '%',
-                  qty: 100, yen: localCost, perU: localCost / 100, remain: 100, status: '在庫あり', source: '作り置き' });
-    S.foods.push({ id: 'tmp' + oid, name: prepName, category: '作り置き', unit: '%', tracked: true, lastQty: 100, lastYen: 0, lastBuy: '' });
+    var pq = prepServings > 0 ? prepServings : 100;
+    var pu = prepServings > 0 ? '食' : '%';
+    S.lots.push({ id: 'tmp' + oid, date: recDate(), foodId: 'tmp' + oid, name: prepName, unit: pu,
+                  qty: pq, yen: localCost, perU: localCost / pq, remain: pq, status: '在庫あり', source: '作り置き' });
+    S.foods.push({ id: 'tmp' + oid, name: prepName, category: '作り置き', unit: pu, tracked: true, lastQty: pq, lastYen: 0, lastBuy: '' });
   }
   // 1回の記録が終わったら、食事区分は時刻の自動判定に戻す
   S.ent = {}; S.kind = {}; S.open = null; S.makePrep = false;
