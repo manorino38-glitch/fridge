@@ -90,6 +90,9 @@ const MEALS = ['朝', '昼', '夕', '間食'];
 /** 作り置きロットの内容量。%で管理するため常に100 */
 const PREP_UNIT = 100;
 const PREP_UNIT_LABEL = '%';
+/* 何食ぶんできたかが分かっているときは、%ではなく食数で持つ。
+   「あと何食あるか」は%からは読めないので、分かるなら食のほうがいい。 */
+const PREP_SERVING_LABEL = '食';
 
 
 /* =============================================================================
@@ -544,19 +547,24 @@ function apiRecord_(p) {
     // 作り置きロットを1件生成する。新しい仕組みは足さず、既存のロットの形をそのまま使う
     let prepLot = null;
     if (makePrep) {
-      const foodId = ensurePrepFood_(prepName);
+      // 何食ぶんできたかを入れてもらえたら食数で、無ければ今までどおり全体を100%として持つ
+      const servings = num_(p.prepServings);
+      const pQty  = servings > 0 ? servings : PREP_UNIT;
+      const pUnit = servings > 0 ? PREP_SERVING_LABEL : PREP_UNIT_LABEL;
+
+      const foodId = ensurePrepFood_(prepName, pUnit, pQty);
       const lotId = newId_('L');
       const cost = Math.round(prepCost * 100) / 100;
       ensureRoom_(shLots, shLots.getLastRow() + 1, HEADERS.lots.length);
       shLots.appendRow(rowFor_('lots', {
         'ロットID': lotId, '日付': date, '食材ID': foodId, '品名': prepName,
-        '単位': PREP_UNIT_LABEL, '内容量': PREP_UNIT, '金額': cost, '円/単位': cost / PREP_UNIT,
-        '残量': PREP_UNIT, '状態': '在庫あり', '由来': '作り置き', '作成日時': nowStr_(),
+        '単位': pUnit, '内容量': pQty, '金額': cost, '円/単位': cost / pQty,
+        '残量': pQty, '状態': '在庫あり', '由来': '作り置き', '作成日時': nowStr_(),
       }));
       prepLot = {
-        id: lotId, date: date, foodId: foodId, name: prepName, unit: PREP_UNIT_LABEL,
-        qty: PREP_UNIT, yen: cost, perU: cost / PREP_UNIT,
-        remain: PREP_UNIT, status: '在庫あり', source: '作り置き',
+        id: lotId, date: date, foodId: foodId, name: prepName, unit: pUnit,
+        qty: pQty, yen: cost, perU: cost / pQty,
+        remain: pQty, status: '在庫あり', source: '作り置き',
       };
       const ki = idx_('cons', '種別'), ti = idx_('cons', '振替先ロットID');
       consRows.forEach(function (r) { if (r[ki] === KIND.prep) r[ti] = lotId; });
@@ -1323,19 +1331,30 @@ function foodOut_(f) {
   };
 }
 
-function ensurePrepFood_(name) {
+function ensurePrepFood_(name, unit, qty) {
+  const u = unit || PREP_UNIT_LABEL;
+  const q = qty > 0 ? qty : PREP_UNIT;
+
   const hit = readAll_('foods').filter(function (f) {
     return String(f['品名']) === name && String(f['置き場カテゴリ']) === '作り置き';
   })[0];
-  if (hit) return String(hit['食材ID']);
+  if (hit) {
+    // 同じ名前で作り方を変えた（%から食数に切り替えた）ときは、マスタ側も合わせる
+    if (String(hit['単位']) !== u) {
+      const shF = sheet_('foods');
+      setCell_(shF, hit._row, col_('foods', '単位'), u);
+      setCell_(shF, hit._row, col_('foods', '前回の量'), q);
+    }
+    return String(hit['食材ID']);
+  }
 
   const id = newId_('F');
   const shPf = sheet_('foods');
   ensureRoom_(shPf, shPf.getLastRow() + 1, HEADERS.foods.length);
   shPf.appendRow(rowFor_('foods', {
     '食材ID': id, '品名': name, '表記ゆれ': '', '置き場カテゴリ': '作り置き',
-    '単位': PREP_UNIT_LABEL, '在庫管理する': true,
-    '前回の量': PREP_UNIT, '前回の円': '', '更新日時': nowStr_(),
+    '単位': u, '在庫管理する': true,
+    '前回の量': q, '前回の円': '', '更新日時': nowStr_(),
   }));
   return id;
 }
