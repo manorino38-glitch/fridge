@@ -233,7 +233,13 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
 .mealrow .k{font-size:10px;font-weight:800;color:var(--ink-2)}
 .mealrow .v{font-size:14px;font-weight:800;margin-top:2px}
 .mealrow div.z .v{color:var(--ink-3);font-weight:600}
-.it{display:grid;grid-template-columns:40px 1fr auto;gap:9px;align-items:baseline;padding:10px 0;border-top:1px solid var(--line)}
+.it{display:grid;grid-template-columns:40px 1fr auto 30px;gap:9px;align-items:baseline;padding:10px 0;border-top:1px solid var(--line)}
+.it .del{align-self:center;width:30px;height:30px;border-radius:9px;font-size:15px;line-height:1;
+  color:var(--line-2);font-weight:700}
+.it .del:active{background:var(--danger-tint);color:var(--danger)}
+.delbox{border:1px solid var(--line);border-radius:12px;background:var(--surface-2);padding:12px 14px;margin:2px 0 14px}
+.delbox .t{font-size:15px;font-weight:800}
+.delbox .m{font-size:12px;color:var(--ink-2);margin-top:4px;font-variant-numeric:tabular-nums}
 .it .tm{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
 .it .g{min-width:0}
 .it .g b{font-size:14px;font-weight:700}
@@ -440,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-08-26a';
+var APP_VERSION = '2026-09-05a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -938,6 +944,7 @@ function todayHtml() {
         '<span class="g"><b>' + esc(x.name) + '</b>' + qty + tag +
           (x.meal ? '<span>' + esc(x.meal) + '</span>' : '') + '</span>' +
         '<span class="amt">' + (x.counted ? yen(x.yen) : '<span style="color:var(--ink-3)">—</span>') + '</span>' +
+        '<button class="del" data-del="' + esc(x.id) + '" aria-label="この記録を消す">✕</button>' +
         '</div>';
     }).join('');
   }
@@ -1010,6 +1017,64 @@ function copyRowHtml(d) {
          '<div class="copyrow">' + btns +
            '<button class="wide" data-cp="*">1日ぶん</button>' +
          '</div>';
+}
+
+/* ---- 明細から1件消す ------------------------------------------------------
+ * 間違えて記録したものを、あとから消せるようにする。
+ * 記録直後のトーストの「取り消す」は消えてしまうと使えないため。
+ * 何が消えて在庫がどう戻るかを先に見せてから消す。
+ * ------------------------------------------------------------------------*/
+function askDelete(id) {
+  var d = dayView();
+  var x = ((d && d.items) || []).filter(function (i) { return String(i.id) === String(id); })[0];
+  if (!x) return;
+
+  var line = [x.time, x.name, x.qty ? fmtQty(x.qty, x.unit) : '', x.counted ? yen(x.yen) : '']
+    .filter(Boolean).join('　');
+
+  var note;
+  if (x.kind === '作り置きへ振替') {
+    note = 'この材料を作り置きに回した記録です。消すと材料が在庫に戻り、' +
+           '作り置きの金額もそのぶん減ります（材料がこれだけなら作り置きごと消えます）。' +
+           'すでにその作り置きを食べていると消せません。';
+  } else if (x.from === '在庫外') {
+    note = 'この支出を消します。在庫には影響しません。';
+  } else if (x.counted) {
+    note = '食べなかったことにして、この分を在庫に戻します。';
+  } else {
+    note = 'この記録を消して、この分を在庫に戻します。';
+  }
+
+  openSheet(
+    '<h3>この記録を消しますか？</h3>' +
+    '<div class="delbox"><div class="t">' + esc(x.name) + '</div>' +
+      '<div class="m">' + esc(line) + '</div></div>' +
+    '<p class="tiny muted" style="margin:0 0 14px;line-height:1.8">' + esc(note) + '</p>' +
+    '<button class="btn" id="delGo" style="background:var(--danger)">消す</button>' +
+    '<div style="height:9px"></div>' +
+    '<button class="btn quiet" id="delNo">やめる</button>'
+  );
+  $('#delNo').onclick = closeSheet;
+  $('#delGo').onclick = function () {
+    var b = $('#delGo');
+    b.disabled = true; b.textContent = '消しています…';
+    call('deleteRecord', { id: id }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '消せませんでした');
+      closeSheet();
+      if (r.summary) S.summary = r.summary;
+      S.dayCache = {};
+      return refresh(true).then(function () {
+        showDay(dayKey());          // 見ていた日の明細を取り直す（過去日でも合うように）
+        var extra = '';
+        if (r.removed && r.removed.prepDeleted) extra = '（「' + r.removed.prepDeleted + '」も消しました）';
+        toast(x.name + ' の記録を消しました' + extra);
+      });
+    }).catch(function (e) {
+      var b2 = $('#delGo');
+      if (b2) { b2.disabled = false; b2.textContent = '消す'; }
+      toastErr((e && e.message) || '消せませんでした');
+    });
+  };
 }
 
 function copyMeal(meal) {
@@ -1166,6 +1231,9 @@ $('#v-summary').addEventListener('click', function (e) {
 
   var cp = e.target.closest('[data-cp]');
   if (cp && !cp.disabled) { copyMeal(cp.dataset.cp); return; }
+
+  var del = e.target.closest('[data-del]');
+  if (del) { askDelete(del.dataset.del); return; }
 
   var bar = e.target.closest('[data-day]');
   if (bar) {
