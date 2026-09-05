@@ -289,6 +289,7 @@ function dispatch_(action, p) {
     case 'record':        return apiRecord_(p);
     case 'addExpense':    return apiAddExpense_(p);
     case 'undo':          return apiUndo_(p);
+    case 'deleteRecord':  return apiDeleteRecord_(p);
     case 'setCategories': return apiSetConf_('categories', p.categories);
     case 'setOutKinds':   return apiSetConf_('outKinds', p.outKinds);
     case 'setUnits':      return apiSetConf_('units', p.units);
@@ -614,6 +615,80 @@ function apiAddExpense_(p) {
 }
 
 /** 直前の記録を取り消す。残量も戻す。 */
+/**
+ * 明細から1件だけ消す。画面の「日ごとの明細」から使う。
+ *
+ * 消費なら、その分の量をロットに戻す（食べていないことにする）。
+ * 在庫外支出なら、その行を消すだけ。
+ * 作り置きへの振替は、消すと作り置き側のつじつまが合わなくなるので、
+ *   ・その作り置きをもう食べていたら断る（先にそちらを消してもらう）
+ *   ・材料がそれ1つだけなら、作り置きごと消す
+ *   ・他にも材料があるなら、その材料ぶんだけ作り置きの金額から引く
+ * ロック持ちの関数を呼ぶので、ここでは自分でロックを取らない。
+ */
+function apiDeleteRecord_(p) {
+  const id = String((p && p.id) || '');
+  if (!id) return { ok: false, error: 'どの記録かが指定されていません' };
+
+  const out = readAll_('out').filter(function (o) { return String(o['支出ID']) === id; })[0];
+  if (out) {
+    const r = apiUndo_({ expenseIds: [id] });
+    if (r.ok) r.removed = { kind: '在庫外支出', name: String(out['店名・品名'] || out['区分']), yen: num_(out['金額']) };
+    return r;
+  }
+
+  const all = readAll_('cons');
+  const c = all.filter(function (x) { return String(x['消費ID']) === id; })[0];
+  if (!c) return { ok: false, error: 'その記録が見つかりません' };
+
+  const removed = {
+    kind: String(c['種別']), name: String(c['品名']),
+    qty: num_(c['使用量']), unit: String(c['単位'] || ''), yen: num_(c['金額']),
+  };
+  const prepId = String(c['振替先ロットID'] || '');
+
+  if (!prepId) {
+    const r = apiUndo_({ consIds: [id] });
+    if (r.ok) r.removed = removed;
+    return r;
+  }
+
+  const eaten = all.filter(function (x) { return String(x['ロットID']) === prepId; });
+  if (eaten.length) {
+    const prep = readAll_('lots').filter(function (l) { return String(l['ロットID']) === prepId; })[0];
+    return { ok: false,
+      error: '「' + (prep ? String(prep['品名']) : '作り置き') + '」はもう食べた記録があります。先にそちらを消してください' };
+  }
+
+  const others = all.filter(function (x) {
+    return String(x['振替先ロットID']) === prepId && String(x['消費ID']) !== id;
+  });
+
+  const r = apiUndo_({ consIds: [id] });
+  if (!r.ok) return r;
+
+  if (!others.length) {
+    // 材料がこれだけだったので、できていた作り置きごと消す
+    const sh = sheet_('lots');
+    const row = findRow_(sh, col_('lots', 'ロットID'), prepId);
+    const prep = readAll_('lots').filter(function (l) { return String(l['ロットID']) === prepId; })[0];
+    if (row > 0) sh.deleteRow(row);
+    removed.prepDeleted = prep ? String(prep['品名']) : '';
+  } else {
+    // 他の材料は残るので、この材料ぶんだけ作り置きの金額を減らす
+    const prep = readAll_('lots').filter(function (l) { return String(l['ロットID']) === prepId; })[0];
+    if (prep) {
+      const fixed = apiFixLot_({ lotId: prepId, yen: r2_(num_(prep['金額']) - num_(c['金額'])) });
+      if (fixed.ok) removed.prepFixed = { name: String(prep['品名']), before: num_(prep['金額']), after: fixed.lot.after };
+    }
+  }
+
+  const day = d2s_(c['日付'] || String(c['日時']).slice(0, 10));
+  return { ok: true, removed: removed,
+           summary: buildSummary_(day.slice(0, 7)), day: buildDay_(today_()) };
+}
+
+
 function apiUndo_(p) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
