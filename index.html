@@ -446,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-05a';
+var APP_VERSION = '2026-09-05b';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1029,7 +1029,7 @@ function askDelete(id) {
   var x = ((d && d.items) || []).filter(function (i) { return String(i.id) === String(id); })[0];
   if (!x) return;
 
-  var line = [x.time, x.name, x.qty ? fmtQty(x.qty, x.unit) : '', x.counted ? yen(x.yen) : '']
+  var line = [x.time, x.meal, x.qty ? fmtQty(x.qty, x.unit) : '', x.counted ? yen(x.yen) : '']
     .filter(Boolean).join('　');
 
   var note;
