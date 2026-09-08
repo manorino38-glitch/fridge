@@ -179,6 +179,55 @@ section('廃棄・調整の記録も消せる');
   ok('廃棄の集計も戻る', near(e.call('summary', { ym: '2026-09' }).summary.waste, 0));
 }
 
+section('仕入の金額を後から直す（0円にできる）');
+{
+  const e = newEnv();
+  const f = e.call('addFood', { name: 'BASEラーメン', category: '常温', unit: '個', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 2, yen: 784, unit: '個', date: '2025-12-10' }] }).lots[0];
+  e.call('record', { meal: '昼', datetime: '2026-09-05 12:00:00', entries: [{ lotId: lot.id, qty: 1 }] });
+  ok('食べると食費に乗る', near(e.call('summary', { ym: '2026-09' }).summary.total, 392));
+
+  // もう払い終わっているので0円にする
+  const z = e.call('fixLot', { lotId: lot.id, yen: 0 });
+  ok('0円に直せる', z.ok === true, z.error);
+  ok('金額が0になる', near(z.lot.after, 0), z.lot);
+  ok('食べた分も0円に引き直される', z.cons.length === 1 && near(z.cons[0].after, 0), z.cons);
+  ok('食費から消える', near(e.call('summary', { ym: '2026-09' }).summary.total, 0));
+  ok('在庫の評価額も0になる', near(e.call('summary', { ym: '2026-09' }).summary.stockValue, 0));
+
+  const b = e.call('bootstrap', {});
+  const l2 = b.lots.filter((x) => x.name === 'BASEラーメン')[0];
+  ok('数量は減らない', l2 && near(l2.remain, 1), l2 && l2.remain);
+  ok('在庫としては残る', l2 && l2.status === '在庫あり');
+
+  // 0円のロットを食べても食費は動かない
+  const before = e.call('summary', { ym: '2026-09' }).summary.total;
+  e.call('record', { meal: '夕', datetime: '2026-09-06 19:00:00', entries: [{ lotId: lot.id, qty: 1 }] });
+  ok('0円の在庫は食べても食費が動かない',
+     near(e.call('summary', { ym: '2026-09' }).summary.total, before));
+
+  // 0円で最初から仕入れることもできる（完全メシ・乾物用）
+  const g = e.call('addFood', { name: '完全メシ', category: '常温', unit: '個', tracked: true });
+  const l3 = e.call('addLots', { items: [{ foodId: g.food.id, qty: 4, yen: 0, unit: '個', date: '2026-03-01' }] });
+  ok('0円で仕入れられる', l3.ok === true, l3.error);
+  ok('円/単位も0', near(l3.lots[0].perU, 0));
+  e.call('record', { meal: '昼', datetime: '2026-09-07 12:00:00', entries: [{ lotId: l3.lots[0].id, qty: 1 }] });
+  ok('食べても食費に乗らない', near(e.call('summary', { ym: '2026-09' }).summary.total, before));
+  ok('残量はちゃんと減る',
+     near(e.call('bootstrap', {}).lots.filter((x) => x.name === '完全メシ')[0].remain, 3));
+
+  // 負の金額は断る
+  ok('マイナスは断る', e.call('fixLot', { lotId: lot.id, yen: -100 }).ok === false);
+  ok('ロットIDが無ければ断る', e.call('fixLot', { yen: 0 }).ok === false);
+
+  // 打ち間違いを直す用途も従来どおり
+  const h = e.call('addFood', { name: '鶏もも肉', category: 'チルド', unit: 'g', tracked: true });
+  const l4 = e.call('addLots', { items: [{ foodId: h.food.id, qty: 330, yen: 3460, unit: 'g', date: '2026-09-01' }] }).lots[0];
+  const fx = e.call('fixLot', { lotId: l4.id, yen: 346 });
+  ok('桁の打ち間違いも直せる', fx.ok && near(fx.lot.after, 346), fx.error);
+  ok('円/単位が引き直される', near(fx.lot.perU, 346 / 330));
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
