@@ -929,7 +929,9 @@ function apiFixLot_(p) {
   const lotId = String((p && p.lotId) || '');
   const newYen = num_(p && p.yen);
   if (!lotId) return { ok: false, error: 'どの仕入かが指定されていません' };
-  if (!(newYen > 0)) return { ok: false, error: '金額を入れてください' };
+  // 0円は認める。記録を始める前に買ってあって、もう払い終わっているものを
+  // 「持ってはいるが今月の食費には出てこない」状態で置くのに使う。
+  if (!(newYen >= 0)) return { ok: false, error: '金額を入れてください' };
 
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
