@@ -446,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-05b';
+var APP_VERSION = '2026-09-08a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1469,7 +1469,8 @@ function rowHtml(foodId, lots, cat) {
       '実際の残りに数量だけ合わせたいときに使います。</div>' +
     '<div class="lab" style="margin-top:12px">このロット: ' + fmtQty(lot.qty, unit) + ' / ' + yen(lot.yen) +
       ' で ' + fmtMD(lot.date) + ' 購入</div>' +
-    (isPrep ? '' : '<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
+    '<button class="lnk" data-act="fixyen" data-lot="' + esc(lot.id) + '">金額を直す</button>' +
+    (isPrep ? '' : '　<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
     '</div>';
   return row + detail;
 }
@@ -1501,6 +1502,7 @@ $('#v-fridge').addEventListener('click', function (e) {
   if (act === 'detail') { S.open = (S.open === foodId ? null : foodId); renderFridge(); return; }
   if (act === 'pick')   { S.sel[foodId] = btn.dataset.pick; renderFridge(); renderFoot(); return; }
   if (act === 'editfood') { showEditFood(foodId); return; }
+  if (act === 'fixyen') { showFixYen(btn.dataset.lot); return; }
   if (act === 'all' || act === 'all2') {
     var cur = S.ent[lot.id] || 0;
     if (Math.abs(cur - lot.remain) < 0.005) delete S.ent[lot.id];
@@ -2206,6 +2208,67 @@ function showFoodSheet(foodId) {
     }
   };
 }
+/* ---- 仕入の金額を後から直す --------------------------------------------
+ * 打ち間違いを直すためと、もう払い終わっているものを0円で置くための両方に使う。
+ * 金額を直すと円/単位が変わるので、そのロットから出た消費の金額も一緒に引き直す。
+ * 数量には触らないので、残量や在庫の状態は変わらない。
+ * ------------------------------------------------------------------------*/
+function showFixYen(lotId) {
+  var lot = lotById(lotId);
+  if (!lot) return;
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+
+  openSheet(
+    '<h3>金額を直す</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">' + esc(fmtMD(lot.date)) + '購入　' + esc(fmtQty(lot.qty, lot.unit)) +
+      '　いまは ' + yen(lot.yen) + '（' + esc(fmtUnitPrice(lot.perU, lot.unit)) + '）</div></div>' +
+    '<label class="fld"><span>直したあとの金額</span>' +
+      '<div class="inw"><input id="fyY" inputmode="decimal" value="' + (Math.round(lot.yen * 100) / 100) + '"><i>円</i></div></label>' +
+    '<div class="perg" id="fyOut">&nbsp;</div>' +
+    '<p class="tiny muted" style="margin:2px 0 14px;line-height:1.8">' +
+      '数量は変わりません。このロットから食べた分の金額も、同じ単価で引き直します。<br>' +
+      '記録を始める前に買ってあって、もう払い終わっているものは <b>0</b> と入れてください。' +
+      '持ってはいるけれど、食べても食費に出てこない状態になります。</p>' +
+    '<button class="btn" id="fyGo">この金額にする</button>' +
+    '<div style="height:9px"></div>' +
+    '<button class="btn quiet" id="fyNo">やめる</button>'
+  );
+
+  var paint = function () {
+    var v = parseFloat($('#fyY').value);
+    var el = $('#fyOut');
+    if (!(v >= 0)) { el.textContent = '金額を入れてください'; return; }
+    if (v === 0) { el.textContent = '0円にすると、食べても食費に出てきません'; return; }
+    el.textContent = fmtUnitPrice(v / lot.qty, lot.unit) + ' になります';
+  };
+  $('#fyY').oninput = paint; paint();
+  setTimeout(function () { var i = $('#fyY'); if (i) { i.focus(); i.select(); } }, 100);
+
+  $('#fyNo').onclick = closeSheet;
+  $('#fyGo').onclick = function () {
+    var v = parseFloat($('#fyY').value);
+    if (!(v >= 0)) return toastErr('金額を入れてください');
+    var b = $('#fyGo');
+    b.disabled = true; b.textContent = '直しています…';
+    call('fixLot', { lotId: lotId, yen: v }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '直せませんでした');
+      closeSheet();
+      if (r.summary) S.summary = r.summary;
+      S.dayCache = {};
+      return refresh(true).then(function () {
+        var n = (r.cons || []).length;
+        toast(name + ' を ' + yen(v) + ' に直しました' + (n ? '（食べた分 ' + n + '件も引き直し）' : ''));
+      });
+    }).catch(function (e) {
+      var b2 = $('#fyGo');
+      if (b2) { b2.disabled = false; b2.textContent = 'この金額にする'; }
+      toastErr((e && e.message) || '直せませんでした');
+    });
+  };
+}
+
 function showEditFood(foodId) { showFoodSheet(foodId); }
 
 /* ============================================================================
