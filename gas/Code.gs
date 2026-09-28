@@ -509,6 +509,11 @@ function apiRecord_(p) {
     const consRows = [], consIds = [], touched = [];
     let prepCost = 0;
 
+    // ここでは数えるだけで、シートにはまだ何も書かない。
+    // 途中で止まったときに「在庫だけ減って記録が残らない」状態を作らないため、
+    // 書き込みは全部の計算が終わってからまとめて行う（下の「書き込みはここから」）。
+    const remainEdits = [];   // { row, remain, status }
+
     entries.forEach(function (en) {
       const lot = byId[String(en.lotId)];
       if (!lot) throw new Error('ロットが見つかりません: ' + en.lotId);
@@ -535,10 +540,10 @@ function apiRecord_(p) {
         '種別': kind, '振替先ロットID': '', '作成日時': nowStr_(),
       }));
 
-      const newRemain = Math.round((remain - qty) * 1000) / 1000;
+      const newRemain = Math.max(0, Math.round((remain - qty) * 1000) / 1000);
       const status = newRemain <= 0.0005 ? '使い切り' : '在庫あり';
-      shLots.getRange(lot._row, col_('lots', '残量'), 1, 2).setValues([[Math.max(0, newRemain), status]]);
-      lot['残量'] = Math.max(0, newRemain);
+      remainEdits.push({ row: lot._row, remain: newRemain, status: status });
+      lot['残量'] = newRemain;
       lot['状態'] = status;
       touched.push(lotOut_(lot));
     });
@@ -571,9 +576,18 @@ function apiRecord_(p) {
       consRows.forEach(function (r) { if (r[ki] === KIND.prep) r[ti] = lotId; });
     }
 
+    /* ---- 書き込みはここから -------------------------------------------
+     * 明細を先に、在庫の残量を後に書く。順番には理由がある。
+     * 途中で切れたとき、明細だけ残るなら「食べたのに在庫が減っていない」で、
+     * 何を食べたかは残るし後から数を合わせられる。
+     * 逆に在庫だけ減ると、何を食べたか分からないまま食費からも消える。
+     * 前者のほうが直せるので、明細を先に確定させる。
+     * 残量の書き込みも1回にまとめて、途中まで書けた状態を作らない。 */
     const catCons = shCons.getLastRow() + 1;
     ensureRoom_(shCons, catCons + consRows.length - 1, HEADERS.cons.length);
     shCons.getRange(catCons, 1, consRows.length, HEADERS.cons.length).setValues(consRows);
+
+    writeRemains_(shLots, remainEdits);
 
     return {
       ok: true, consIds: consIds, lots: touched, prepLot: prepLot,
@@ -583,6 +597,33 @@ function apiRecord_(p) {
 
   } finally { lock.releaseLock(); }
 }
+
+/**
+ * ロットの残量と状態をまとめて書き戻す。
+ * 1件ずつ setValues を呼ぶと、途中で通信が切れたときに
+ * 一部のロットだけ減った中途半端な状態が残るので、
+ * 対象行をまたぐ範囲を一度読んで、必要な行だけ差し替えて一度で書く。
+ * 間の行は読んだ値をそのまま戻すだけなので影響しない（ロック中なので割り込みもない）。
+ */
+function writeRemains_(shLots, edits) {
+  if (!edits || !edits.length) return;
+
+  const colRemain = col_('lots', '残量');   // 残量と状態は隣り合っている
+  let minRow = edits[0].row, maxRow = edits[0].row;
+  edits.forEach(function (e) {
+    if (e.row < minRow) minRow = e.row;
+    if (e.row > maxRow) maxRow = e.row;
+  });
+
+  const range = shLots.getRange(minRow, colRemain, maxRow - minRow + 1, 2);
+  const vals = range.getValues();
+  edits.forEach(function (e) {
+    vals[e.row - minRow][0] = e.remain;
+    vals[e.row - minRow][1] = e.status;
+  });
+  range.setValues(vals);
+}
+
 
 /**
  * 在庫管理しないが食費には含める支出（外食・飲料・調味料・米など）。
@@ -731,17 +772,20 @@ function apiUndo_(p) {
 
     const shLots = sheet_('lots');
     const touched = [];
+    const remainEdits = [];
     readAll_('lots').forEach(function (l) {
       const back = restored[String(l['ロットID'])];
       if (!back) return;
       const cap = num_(l['内容量']);
       const val = Math.min(cap, Math.round((num_(l['残量']) + back) * 1000) / 1000);
-      shLots.getRange(l._row, col_('lots', '残量'), 1, 2)
-            .setValues([[val, val > 0 ? '在庫あり' : '使い切り']]);
+      const st = val > 0 ? '在庫あり' : '使い切り';
+      remainEdits.push({ row: l._row, remain: val, status: st });
       l['残量'] = val;
-      l['状態'] = val > 0 ? '在庫あり' : '使い切り';
+      l['状態'] = st;
       touched.push(lotOut_(l));
     });
+    // 記録を消したぶんの戻しも一度で書く。途中まで戻った状態を作らない
+    writeRemains_(shLots, remainEdits);
 
     return { ok: true, lots: touched, summary: buildSummary_(today_().slice(0, 7)), day: buildDay_(today_()) };
 
@@ -985,6 +1029,22 @@ const OCR_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interacti
 const OCR_MODEL = 'gemini-3.6-flash';
 const OCR_KEY_PROP = 'OCR_API_KEY';
 
+/**
+ * 読み取りが混んでいて断られたときに、順に試すモデル。
+ * 503（混雑）は「キーが悪い」のではなく向こうの空き待ちなので、
+ * 同じモデルで少し待ってから投げ直し、それでも駄目なら別のモデルに逃がす。
+ * モデルごとに混み方が違うので、これだけで通ることが多い。
+ */
+const OCR_FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+
+/** 同じモデルで投げ直す回数と、その待ち時間（ミリ秒） */
+const OCR_RETRY_WAITS = [1500, 4000];
+
+/** もう一度試す価値のあるHTTPステータスか。混雑と回数制限と一時障害だけ */
+function ocrShouldRetry_(code) {
+  return code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
+}
+
 /** レシートから取り出したいものの形。ここを足せば取れる項目が増える */
 const OCR_SCHEMA = {
   type: 'object',
@@ -1118,26 +1178,47 @@ function apiReadReceipt_(p) {
   // インライン画像は合計20MBまで。余裕を見て切る
   if (image.length > 18 * 1024 * 1024) return { ok: false, error: '画像が大きすぎます。もう少し小さくして送ってください' };
 
-  const body = {
-    model: OCR_MODEL,
-    input: [
-      { type: 'text', text: OCR_PROMPT },
-      { type: 'image', data: image, mime_type: String((p && p.mime) || 'image/jpeg') },
-    ],
-    response_format: { type: 'text', mime_type: 'application/json', schema: OCR_SCHEMA },
-  };
+  const mime = String((p && p.mime) || 'image/jpeg');
 
-  const res = UrlFetchApp.fetch(OCR_ENDPOINT, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-goog-api-key': key },
-    payload: JSON.stringify(body),
-    muteHttpExceptions: true,
-  });
+  // 混んでいて断られることがあるので、同じモデルで少し待って投げ直し、
+  // それでも駄目なら別のモデルに移る。全部落ちたときだけ諦める。
+  const models = [OCR_MODEL].concat(OCR_FALLBACK_MODELS);
+  let code = 0, text = '', usedModel = '', tries = 0;
 
-  const code = res.getResponseCode();
-  const text = res.getContentText();
-  if (code !== 200) return { ok: false, error: ocrHttpError_(code, text), httpCode: code };
+  outer:
+  for (let mi = 0; mi < models.length; mi++) {
+    for (let ti = 0; ti <= OCR_RETRY_WAITS.length; ti++) {
+      if (tries > 0) Utilities.sleep(OCR_RETRY_WAITS[Math.min(ti, OCR_RETRY_WAITS.length - 1)]);
+      tries++;
+      usedModel = models[mi];
+
+      const body = {
+        model: usedModel,
+        input: [
+          { type: 'text', text: OCR_PROMPT },
+          { type: 'image', data: image, mime_type: mime },
+        ],
+        response_format: { type: 'text', mime_type: 'application/json', schema: OCR_SCHEMA },
+      };
+
+      const res = UrlFetchApp.fetch(OCR_ENDPOINT, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'x-goog-api-key': key },
+        payload: JSON.stringify(body),
+        muteHttpExceptions: true,
+      });
+
+      code = res.getResponseCode();
+      text = res.getContentText();
+      if (code === 200) break outer;
+      if (!ocrShouldRetry_(code)) break outer;   // キー違いなどは投げ直しても同じ
+    }
+  }
+
+  if (code !== 200) {
+    return { ok: false, error: ocrHttpError_(code, text), httpCode: code, tries: tries };
+  }
 
   let raw;
   try { raw = JSON.parse(text); } catch (e) { return { ok: false, error: '読み取り結果を解釈できませんでした' }; }
@@ -1157,7 +1238,7 @@ function apiReadReceipt_(p) {
   try { out = JSON.parse(jsonText); }
   catch (e) { return { ok: false, error: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります' }; }
 
-  return { ok: true, receipt: cleanReceipt_(out) };
+  return { ok: true, receipt: cleanReceipt_(out), model: usedModel, tries: tries };
 }
 
 /**
@@ -1262,8 +1343,8 @@ function ocrHttpError_(code, text) {
   try { const j = JSON.parse(text); msg = (j && j.error && (j.error.message || j.error.status)) || ''; } catch (e) {}
   if (code === 400 && /api[ _-]?key/i.test(msg)) return 'キーが正しくないようです。設定から貼り直してください';
   if (code === 401 || code === 403) return 'キーが使えませんでした。設定から貼り直してください';
-  if (code === 429) return '読み取りの回数制限に当たりました。少し待ってからもう一度';
-  if (code >= 500) return '読み取り側が一時的に応答しませんでした。もう一度試してください';
+  if (code === 429) return '読み取りの回数が立て込んでいます。1分ほど空けてからもう一度';
+  if (code >= 500) return '読み取り側がどのモデルも混み合っていました。少し時間をおいてからもう一度';
   return '読み取りに失敗しました（' + code + '）' + (msg ? ': ' + msg.slice(0, 120) : '');
 }
 
