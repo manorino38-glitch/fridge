@@ -1031,18 +1031,25 @@ const OCR_KEY_PROP = 'OCR_API_KEY';
 
 /**
  * 読み取りが混んでいて断られたときに、順に試すモデル。
- * 503（混雑）は「キーが悪い」のではなく向こうの空き待ちなので、
- * 同じモデルで少し待ってから投げ直し、それでも駄目なら別のモデルに逃がす。
- * モデルごとに混み方が違うので、これだけで通ることが多い。
+ * 503は「キーが悪い」のではなく、そのモデルの空き待ち。
+ * 混み方はモデルごとに違うので、同じモデルで粘るより先に別のモデルへ回すほうが速い。
+ * 一周して全部塞がっていたら、少し待ってもう一周だけする。
  */
-const OCR_FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+const OCR_MODEL_RING = ['gemini-3.8-flash', 'gemini-3.5-flash'];
 
-/** 同じモデルで投げ直す回数と、その待ち時間（ミリ秒） */
-const OCR_RETRY_WAITS = [1500, 4000];
+/** 二周目に入る前の待ち（ミリ秒）。一周目は待たずに次のモデルへ回す */
+const OCR_ROUND_WAIT = 3000;
 
-/** もう一度試す価値のあるHTTPステータスか。混雑と回数制限と一時障害だけ */
+/** 何周するか。長く粘るより諦めて出直したほうが早いので2周まで */
+const OCR_ROUNDS = 2;
+
+/**
+ * もう一度試す価値のあるHTTPステータスか。
+ * 429（投げすぎ）は投げ直すと状況が悪くなるだけなので、ここには入れない。
+ * キーの単位で掛かる制限なので、モデルを変えても逃げられない。
+ */
 function ocrShouldRetry_(code) {
-  return code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
+  return code === 500 || code === 502 || code === 503 || code === 504;
 }
 
 /** レシートから取り出したいものの形。ここを足せば取れる項目が増える */
@@ -1180,15 +1187,15 @@ function apiReadReceipt_(p) {
 
   const mime = String((p && p.mime) || 'image/jpeg');
 
-  // 混んでいて断られることがあるので、同じモデルで少し待って投げ直し、
-  // それでも駄目なら別のモデルに移る。全部落ちたときだけ諦める。
-  const models = [OCR_MODEL].concat(OCR_FALLBACK_MODELS);
+  // 混んでいて断られたら、待たずに次のモデルへ回す。
+  // 一周して全部塞がっていたら少し待ってもう一周。それでも駄目なら諦める。
+  const models = [OCR_MODEL].concat(OCR_MODEL_RING);
   let code = 0, text = '', usedModel = '', tries = 0;
 
   outer:
-  for (let mi = 0; mi < models.length; mi++) {
-    for (let ti = 0; ti <= OCR_RETRY_WAITS.length; ti++) {
-      if (tries > 0) Utilities.sleep(OCR_RETRY_WAITS[Math.min(ti, OCR_RETRY_WAITS.length - 1)]);
+  for (let round = 0; round < OCR_ROUNDS; round++) {
+    if (round > 0) Utilities.sleep(OCR_ROUND_WAIT);
+    for (let mi = 0; mi < models.length; mi++) {
       tries++;
       usedModel = models[mi];
 
