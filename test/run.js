@@ -243,27 +243,30 @@ section('レシート読取：混んでいたら投げ直す');
   {
     const e = newEnv();
     e.call('setOcrKey', { key: 'x'.repeat(30) });
-    let n = 0;
-    e.net.reply = () => { n++; return n < 3 ? { code: 503, body: busy } : { code: 200, body: good }; };
+    // 3.6 はずっと混雑。別のモデルなら空いている
+    e.net.reply = (url, params) => {
+      const body = JSON.parse(params.payload);
+      return body.model === 'gemini-3.6-flash' ? { code: 503, body: busy } : { code: 200, body: good };
+    };
+    e.net.sleeps.length = 0;
     const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
-    ok('混んでいても投げ直して通る', r.ok === true, r.error);
-    ok('3回目で通った', r.tries === 3, r.tries);
-    ok('待ってから投げ直している', e.net.sleeps.length === 2, e.net.sleeps);
-    ok('同じモデルのまま通った', r.model === 'gemini-3.6-flash', r.model);
+    ok('詰まったら別のモデルに移る', r.ok === true, r.error);
+    ok('移った先が返ってくる', r.model === 'gemini-3.8-flash', r.model);
+    ok('一周目は待たずに回す', e.net.sleeps.length === 0, e.net.sleeps);
     ok('中身も読めている', r.receipt.items[0].name === 'キャベツ', r.receipt);
   }
 
   {
     const e = newEnv();
     e.call('setOcrKey', { key: 'x'.repeat(30) });
-    // 3.6 はずっと混雑。別のモデルなら空いている
-    e.net.reply = (url, params) => {
-      const body = JSON.parse(params.payload);
-      return body.model === 'gemini-3.6-flash' ? { code: 503, body: busy } : { code: 200, body: good };
-    };
+    // 一周目は全部混雑、二周目で空く
+    let n = 0;
+    e.net.reply = () => { n++; return n <= 3 ? { code: 503, body: busy } : { code: 200, body: good }; };
+    e.net.sleeps.length = 0;
     const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
-    ok('詰まったら別のモデルに移る', r.ok === true, r.error);
-    ok('移った先が返ってくる', r.model === 'gemini-3.8-flash', r.model);
+    ok('一周塞がっていても二周目で通る', r.ok === true, r.error);
+    ok('4回目で通った', r.tries === 4, r.tries);
+    ok('二周目の前だけ待つ', e.net.sleeps.length === 1, e.net.sleeps);
   }
 
   {
@@ -274,7 +277,18 @@ section('レシート読取：混んでいたら投げ直す');
     const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
     ok('どこも混んでいたら諦める', r.ok === false);
     ok('混雑だと分かる文面になる', /混/.test(r.error), r.error);
-    ok('3つのモデルを3回ずつ試した', e.net.fetches.length === 9, e.net.fetches.length);
+    ok('3モデルを2周で打ち止め', e.net.fetches.length === 6, e.net.fetches.length);
+  }
+
+  {
+    // 429は投げすぎのサイン。投げ直すと悪化するので一度で引く
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = () => ({ code: 429, body: JSON.stringify({ error: { message: 'Too many requests' } }) });
+    e.net.fetches.length = 0;
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('回数制限なら投げ直さない', e.net.fetches.length === 1, e.net.fetches.length);
+    ok('間を空けるよう伝える', /空けて/.test(r.error), r.error);
   }
 
   {
