@@ -446,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-28a';
+var APP_VERSION = '2026-09-28b';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -2362,8 +2362,8 @@ function ocrBusyHtml() {
       (b.err ? '　<span style="color:var(--danger)">' + esc(b.err) + '</span>' : '') + '</div>' +
     '<div class="prog"><i style="width:' + pct + '%"></i></div>' +
     '<p class="tiny muted" style="margin:14px 0 0;line-height:1.8">1枚あたり30秒ほど、' +
-    '読み取り側が混んでいるときは1分半ほどかかります。' +
-    '混んでいても自動で何度か投げ直すので、そのままお待ちください。写真は保存されません。</p></div>';
+    '読み取り側が混んでいるときは1分ほどかかります。' +
+    '混んでいても空いているところを探しに行くので、そのままお待ちください。写真は保存されません。</p></div>';
 }
 
 /** 写真を選ばせて、順に読む */
