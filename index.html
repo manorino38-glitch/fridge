@@ -446,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-08a';
+var APP_VERSION = '2026-09-28a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -495,8 +495,14 @@ function saveCfg() {
   catch (e) { return false; }
 }
 
-function call(action, payload, opId) {
-  var req = { action: action, token: CFG.token || '', payload: payload || {}, opId: opId || null };
+/* 通信が切れたときに黙って投げ直す回数と、その待ち時間（ミリ秒）。
+ * 電波の瞬断やWi-Fiの切り替わりで1回落ちるだけ、というのが多いので、
+ * 少し待ってもう一度投げるとそのまま通る。
+ * 送信のたびに opId を振って同じ依頼は一度しか処理されないので、
+ * 記録を投げ直しても二重に入らない。 */
+var CALL_RETRY_WAITS = [600, 1500];
+
+function callOnce(req) {
   if (IS_GAS) {
     return new Promise(function (res, rej) {
       google.script.run
@@ -511,6 +517,21 @@ function call(action, payload, opId) {
     body: JSON.stringify(req),
     redirect: 'follow',
   }).then(function (r) { return r.json(); });
+}
+
+function call(action, payload, opId) {
+  var req = { action: action, token: CFG.token || '', payload: payload || {}, opId: opId || null };
+
+  // レシート読取はGAS側で既に何度も投げ直していて1回が長いので、こちらは控えめに
+  var waits = (action === 'readReceipt') ? CALL_RETRY_WAITS.slice(0, 1) : CALL_RETRY_WAITS;
+
+  var attempt = function (i) {
+    return callOnce(req).catch(function (e) {
+      if (i >= waits.length) throw e;
+      return new Promise(function (r) { setTimeout(r, waits[i]); }).then(function () { return attempt(i + 1); });
+    });
+  };
+  return attempt(0);
 }
 
 /* ---- 送信キュー --------------------------------------------------------- */
@@ -2340,8 +2361,9 @@ function ocrBusyHtml() {
     '<div class="small muted" style="margin-top:6px">' + b.total + '枚のうち ' + (b.done + 1) + '枚目' +
       (b.err ? '　<span style="color:var(--danger)">' + esc(b.err) + '</span>' : '') + '</div>' +
     '<div class="prog"><i style="width:' + pct + '%"></i></div>' +
-    '<p class="tiny muted" style="margin:14px 0 0;line-height:1.8">1枚あたり10秒ほどかかります。' +
-    'この画面のままお待ちください。写真は保存されません。</p></div>';
+    '<p class="tiny muted" style="margin:14px 0 0;line-height:1.8">1枚あたり30秒ほど、' +
+    '読み取り側が混んでいるときは1分半ほどかかります。' +
+    '混んでいても自動で何度か投げ直すので、そのままお待ちください。写真は保存されません。</p></div>';
 }
 
 /** 写真を選ばせて、順に読む */
