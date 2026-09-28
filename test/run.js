@@ -228,6 +228,127 @@ section('仕入の金額を後から直す（0円にできる）');
   ok('円/単位が引き直される', near(fx.lot.perU, 346 / 330));
 }
 
+/* ------------------------------------------------------------------ */
+section('レシート読取：混んでいたら投げ直す');
+{
+  // 読み取りが成功したときに返ってくる形をまねる
+  const good = JSON.stringify({
+    output_text: JSON.stringify({
+      date: '2026-09-28', store: 'テスト店', taxMode: '内税', total: 198,
+      items: [{ name: 'キャベツ', yen: 198, taxRate: 8 }],
+    }),
+  });
+  const busy = JSON.stringify({ error: { message: 'The model is overloaded.', status: 'UNAVAILABLE' } });
+
+  {
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    let n = 0;
+    e.net.reply = () => { n++; return n < 3 ? { code: 503, body: busy } : { code: 200, body: good }; };
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('混んでいても投げ直して通る', r.ok === true, r.error);
+    ok('3回目で通った', r.tries === 3, r.tries);
+    ok('待ってから投げ直している', e.net.sleeps.length === 2, e.net.sleeps);
+    ok('同じモデルのまま通った', r.model === 'gemini-3.6-flash', r.model);
+    ok('中身も読めている', r.receipt.items[0].name === 'キャベツ', r.receipt);
+  }
+
+  {
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    // 3.6 はずっと混雑。別のモデルなら空いている
+    e.net.reply = (url, params) => {
+      const body = JSON.parse(params.payload);
+      return body.model === 'gemini-3.6-flash' ? { code: 503, body: busy } : { code: 200, body: good };
+    };
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('詰まったら別のモデルに移る', r.ok === true, r.error);
+    ok('移った先が返ってくる', r.model === 'gemini-3.8-flash', r.model);
+  }
+
+  {
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = () => ({ code: 503, body: busy });
+    e.net.fetches.length = 0;   // setup() が権限確認で1回叩いているので、ここから数える
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('どこも混んでいたら諦める', r.ok === false);
+    ok('混雑だと分かる文面になる', /混/.test(r.error), r.error);
+    ok('3つのモデルを3回ずつ試した', e.net.fetches.length === 9, e.net.fetches.length);
+  }
+
+  {
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = () => ({ code: 400, body: JSON.stringify({ error: { message: 'API key not valid' } }) });
+    e.net.fetches.length = 0;
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('キー違いは投げ直さない', e.net.fetches.length === 1, e.net.fetches.length);
+    ok('キーを貼り直すよう伝える', /キー/.test(r.error), r.error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+section('記録は在庫だけ減って明細が消えることがない');
+{
+  const e = newEnv();
+  const f = e.call('addFood', { name: 'にんじん', category: '野菜室', unit: '本', tracked: true });
+  const g = e.call('addFood', { name: 'さくら漬け', category: '冷蔵', unit: 'g', tracked: true });
+  const h = e.call('addFood', { name: '冷凍ごはん', category: '冷凍', unit: '食', tracked: true });
+  const L = e.call('addLots', { items: [
+    { foodId: f.food.id, qty: 3, yen: 341, unit: '本', date: '2026-09-16' },
+    { foodId: g.food.id, qty: 225, yen: 106, unit: 'g', date: '2026-09-02' },
+    { foodId: h.food.id, qty: 9, yen: 224, unit: '食', date: '2026-09-14' },
+  ] }).lots;
+
+  const r = e.call('record', { meal: '昼', datetime: '2026-09-18 15:30:00', entries: [
+    { lotId: L[0].id, qty: 0.5 }, { lotId: L[1].id, qty: 10 }, { lotId: L[2].id, qty: 1 },
+  ] });
+  ok('まとめて記録できる', r.ok === true, r.error);
+
+  // 「内容量 − 記録済みの消費 = 残量」が全部のロットで合っていること。
+  // 9/18の事故は、ここがズレた（残量だけ減って明細が無かった）
+  const lots = e.rows('仕入'), cons = e.rows('消費');
+  const used = {};
+  cons.forEach((c) => { used[String(c['ロットID'])] = (used[String(c['ロットID'])] || 0) + Number(c['使用量']); });
+  const allMatch = lots.every((l) => near(Number(l['内容量']) - (used[String(l['ロットID'])] || 0), Number(l['残量'])));
+  ok('残量と明細が食い違わない', allMatch,
+     lots.map((l) => l['品名'] + ':' + l['残量'] + '/' + l['内容量'] + ' 使用' + (used[String(l['ロットID'])] || 0)));
+  ok('3件とも明細に残る', cons.length === 3, cons.length);
+
+  // 消してもズレない
+  e.call('deleteRecord', { id: String(cons[0]['消費ID']) });
+  const lots2 = e.rows('仕入'), cons2 = e.rows('消費');
+  const used2 = {};
+  cons2.forEach((c) => { used2[String(c['ロットID'])] = (used2[String(c['ロットID'])] || 0) + Number(c['使用量']); });
+  ok('1件消してもズレない',
+     lots2.every((l) => near(Number(l['内容量']) - (used2[String(l['ロットID'])] || 0), Number(l['残量']))),
+     lots2.map((l) => l['品名'] + ':' + l['残量']));
+}
+
+/* ------------------------------------------------------------------ */
+section('残量の書き戻しは飛び飛びの行でも壊れない');
+{
+  const e = newEnv();
+  const ids = [];
+  for (let i = 0; i < 5; i++) {
+    const f = e.call('addFood', { name: '野菜' + i, category: '野菜室', unit: '個', tracked: true });
+    ids.push(e.call('addLots', { items: [{ foodId: f.food.id, qty: 10, yen: 100, unit: '個', date: '2026-09-01' }] }).lots[0].id);
+  }
+  // 1番目と5番目だけ食べる（間の3つは触らない）
+  e.call('record', { meal: '昼', datetime: '2026-09-05 12:00:00',
+                     entries: [{ lotId: ids[0], qty: 3 }, { lotId: ids[4], qty: 4 }] });
+  const byId = {};
+  e.call('bootstrap', {}).lots.forEach((l) => (byId[l.id] = l));
+  ok('端の2つだけ減る', near(byId[ids[0]].remain, 7) && near(byId[ids[4]].remain, 6),
+     [byId[ids[0]].remain, byId[ids[4]].remain]);
+  ok('間の3つは元のまま',
+     [1, 2, 3].every((i) => near(byId[ids[i]].remain, 10)),
+     [1, 2, 3].map((i) => byId[ids[i]].remain));
+  ok('間の3つの状態も元のまま',
+     [1, 2, 3].every((i) => byId[ids[i]].status === '在庫あり'));
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');

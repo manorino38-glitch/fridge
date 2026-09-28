@@ -135,7 +135,7 @@ function makeSandbox(opts = {}) {
   const ss = new Spreadsheet();
   const props = {};
   const cache = {};
-  const net = { fetches: [], reply: () => ({ code: 200, body: '{}' }) };
+  const net = { fetches: [], sleeps: [], reply: () => ({ code: 200, body: '{}' }) };
 
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   // TZ は Asia/Tokyo 固定でよい（Code.gs がそう指定している）
@@ -174,6 +174,8 @@ function makeSandbox(opts = {}) {
           .replace('ss', pad(t.getUTCSeconds()));
       },
       base64Encode: (s) => Buffer.from(s, 'utf8').toString('base64'),
+      // 本物は指定ミリ秒止まる。テストでは待たずに、何回待ったかだけ数える
+      sleep: (ms) => { net.sleeps.push(ms); },
       base64Decode: (s) => Array.from(Buffer.from(s, 'base64')),
     },
     UrlFetchApp: {
