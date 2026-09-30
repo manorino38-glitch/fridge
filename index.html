@@ -446,7 +446,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-28b';
+var APP_VERSION = '2026-09-30a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -608,6 +608,7 @@ var S = {
   tab: 'fridge',
   categories: [], foods: [], lots: [], meals: ['朝','昼','夕','間食'], outKinds: [], units: ['g','ml','個','本','枚'],
   summary: null, day: null, serverDate: '', ym: '',
+  servings: {},            // 食材ID -> 1食あたりの量（任意。入っているものだけ「あと何食」を出す）
   meal: '夕', mealTouched: false,
   recDate: '', recDateTouched: false,   // 冷蔵庫タブの記録日。既定は今日
   ent: {}, kind: {}, sel: {}, open: null,
@@ -664,6 +665,28 @@ function fmtQty(q, u) {
   if (u === 'ml' && v >= 1000) return (Math.round(v / 100) / 10) + 'L';
   return v + (u || '');
 }
+/* ---- 1食あたり -----------------------------------------------------------
+ * プロテインのように、量（g）で持っておきたいけれど
+ * 「あと何食あるか」も知りたいものがある。
+ * 単位を「食」に変えてしまうと、30gだけ飲んだ日を書けなくなるので、
+ * 量はそのままにして、1食あたりの量を食材ごとに任意で持つ。
+ * 設定していない食材では何も出ない（今までの表示と変わらない）。
+ * ------------------------------------------------------------------------*/
+function servingPer(foodId) {
+  var v = Number(S.servings[foodId]);
+  return v > 0 ? v : 0;
+}
+
+/** 「あと6.5食」の文字列。設定がなければ空文字（呼び側で分岐しなくていいように） */
+function servingLeft(foodId, remain) {
+  var per = servingPer(foodId);
+  if (!per) return '';
+  // 割り切れないほうが普通なので、小数第1位まで出す。
+  // 0.5食を「0食」と見せると、まだ飲めるのに空だと思わせてしまう。
+  var n = Math.round((Number(remain) || 0) / per * 10) / 10;
+  return 'あと' + n + '食';
+}
+
 function fmtUnitPrice(perU, u) {
   // 100円を超える単価で小数を出しても読みにくいだけなので丸める（行の幅も稼げる）
   var v = isBulk(u) ? perU * 100 : perU;
@@ -789,6 +812,7 @@ function applyBootstrap(r) {
   S.meals = r.meals || S.meals;
   S.outKinds = r.outKinds || [];
   S.units = r.units || S.units;
+  S.servings = r.servings || {};
   S.summary = r.summary;
   if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
@@ -1448,6 +1472,9 @@ function rowHtml(foodId, lots, cat) {
         ? (fmtMD(lot.date) + '作成 · ' + yen(lot.yen) + ' · 残り' + fmtQty(lot.remain, unit) +
            ' · ' + fmtUnitPrice(lot.perU, unit))
         : ('残り' + pctLeft + '% · ' + fmtQty(lot.remain, unit) + ' · ' + fmtUnitPrice(lot.perU, unit)));
+  // 1食あたりを決めてある食材は、量のあとに「あと何食」を足す
+  var svLeft = isPrep ? '' : servingLeft(foodId, lot.remain);
+  if (svLeft) sub = svLeft + ' · ' + sub;
   if (q > 0 && isWaste) sub = '捨てた分として引きます · ' + sub;
   if (q > 0 && isAdj)   sub = '数を合わせるだけ（食費に入れない） · ' + sub;
 
@@ -1806,9 +1833,13 @@ function buyPickHtml() {
     ? '<button class="btn line" id="bReceipt" style="margin-bottom:16px">レシートを読む</button>'
     : '<button class="btn quiet" id="bReceiptOff" style="margin-bottom:16px">レシートを読む（設定が必要）</button>';
 
+  /* 「新しい食材を登録」は一覧の下ではなく上に置く。
+     品目が増えるほど下に遠のいて、押すたびに一覧をスクロールすることになるので、
+     一覧の長さに関係なく同じ場所にあるほうがいい。 */
   return receipt + panel +
     dateFieldHtml('bDate', '購入日（過去の日付も入れられます）') +
     '<div class="sect"><h2>食材</h2><div class="rule"></div><span class="hint">最近買った順</span></div>' +
+    '<button class="btn quiet" id="bNewFood" style="margin-bottom:10px">＋ 新しい食材を登録</button>' +
     '<label class="fld"><div class="inw wide"><input id="bQuery" type="search" placeholder="絞り込み" value="' + esc(S.buyQuery) + '" autocapitalize="off"></div></label>' +
     '<div id="buyFilter">' + chips + note + '</div>' +
     (list.length
@@ -1819,9 +1850,7 @@ function buyPickHtml() {
             '<span class="r">' + (x.lastQty ? fmtQty(x.lastQty, x.unit) + ' / ' + yen(x.lastYen) : '初めて') + '</span>' +
             '</button>';
         }).join('') + '</div>'
-      : '<div class="empty">見つかりません</div>') +
-    '<div style="height:12px"></div>' +
-    '<button class="btn quiet" id="bNewFood">＋ 新しい食材を登録</button>';
+      : '<div class="empty">見つかりません</div>');
 }
 
 /**
@@ -2160,14 +2189,21 @@ function bindUnitTags() {
       wrap.style.marginTop = '8px';
       wrap.innerHTML = '<input id="uFree" placeholder="単位（例: 束・丁・杯）" value="' + esc(cur) + '" autocapitalize="off">';
       if (!$('#uFree')) box.parentNode.insertBefore(wrap, box.nextSibling);
-      $('#uFree').oninput = function () { $('#uVal').value = this.value.trim() || 'g'; };
+      $('#uFree').oninput = function () { $('#uVal').value = this.value.trim() || 'g'; paintServUnit(); };
       $('#uFree').focus();
       $$('#uTags .tag').forEach(function (c) { c.classList.toggle('on', c === b); });
       return;
     }
     $('#uVal').value = b.dataset.u;
     $$('#uTags .tag').forEach(function (c) { c.classList.toggle('on', c === b); });
+    paintServUnit();
   };
+}
+
+/** 「1食あたり」の欄に出す単位を、選んだ単位に合わせる */
+function paintServUnit() {
+  var i = $('#nServU'), v = $('#uVal');
+  if (i && v) i.textContent = v.value || 'g';
 }
 
 function catTagsHtml(sel) {
@@ -2195,6 +2231,11 @@ function showFoodSheet(foodId) {
     '<div class="fld"><span>置き場</span>' + catTagsHtml(f ? f.category : null) + '</div>' +
     '<div class="fld"><span>単位</span>' + unitTagsHtml(f ? f.unit : 'g') +
       '<em class="src blank">3個入りの納豆なら「個」で内容量3。半分使うものは「個」で0.5と入れられます</em></div>' +
+    '<label class="fld"><span>1食あたり（任意）</span>' +
+      '<div class="inw"><input id="nServ" inputmode="decimal" placeholder="30" value="' +
+        (f && servingPer(f.id) ? servingPer(f.id) : '') + '"><i id="nServU">' + esc(f ? f.unit : 'g') + '</i></div>' +
+      '<em class="src blank">プロテイン30gのように、1回に使う量が決まっているとき。' +
+        '入れると冷蔵庫に「あと6.5食」と出ます。量の持ち方はそのままです</em></label>' +
     '<label class="fld"><span>表記ゆれ（レシート上の別名・カンマ区切り・あとで足せます）</span>' +
       '<div class="inw wide"><input id="nAlias" placeholder="豚小間切落とし,豚コマ" value="' + esc(f ? f.aliases : '') + '" autocapitalize="off"></div></label>' +
     '<div style="height:6px"></div>' +
@@ -2207,21 +2248,35 @@ function showFoodSheet(foodId) {
     var name = $('#nName').value.trim();
     if (!name) return;
     var body = { name: name, category: $('#cVal').value, unit: $('#uVal').value, aliases: $('#nAlias').value.trim(), tracked: true };
+    var serv = Number(($('#nServ') || {}).value) || 0;
     $('#nGo').disabled = true;
+
+    /* 1食あたりは食材本体とは別に持っているので、別の呼び出しになる。
+       こちらが失敗しても食材の保存は取り消さない。
+       「あと何食」が出ないだけで、食材も在庫も正しく残るほうがいい。 */
+    var saveServing = function (foodId, prev) {
+      if (serv === prev) return Promise.resolve();
+      return call('setServing', { foodId: foodId, per: serv }, opId()).then(function (r) {
+        if (r && r.ok && r.servings) S.servings = r.servings;
+      }).catch(function () { toastErr('1食あたりだけ保存できませんでした'); });
+    };
 
     if (f) {
       body.id = f.id;
       call('updateFood', body, opId()).then(function (r) {
-        $('#nGo').disabled = false;
-        if (!r || !r.ok) return toastErr((r && r.error) || '保存できませんでした');
-        closeSheet();
-        refresh(true).then(function () { toast('保存しました'); });
+        if (!r || !r.ok) { $('#nGo').disabled = false; return toastErr((r && r.error) || '保存できませんでした'); }
+        return saveServing(f.id, servingPer(f.id)).then(function () {
+          $('#nGo').disabled = false;
+          closeSheet();
+          refresh(true).then(function () { toast('保存しました'); });
+        });
       });
     } else {
       call('addFood', body, opId()).then(function (r) {
         $('#nGo').disabled = false;
         if (!r || !r.ok) return toastErr((r && r.error) || '登録できませんでした');
         if (!foodById(r.food.id)) S.foods.push(r.food);
+        saveServing(r.food.id, 0);
         S.buyFood = r.food.id; S.buyQuery = ''; S.buyCat = '';
         closeSheet(); renderBuy(); window.scrollTo(0, 0);
         toast(r.duplicated ? '同じ品名がすでにありました' : name + ' を追加しました');
