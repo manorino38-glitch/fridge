@@ -363,6 +363,38 @@ section('残量の書き戻しは飛び飛びの行でも壊れない');
      [1, 2, 3].every((i) => byId[ids[i]].status === '在庫あり'));
 }
 
+/* ------------------------------------------------------------------ */
+section('1食あたりの量');
+{
+  const e = newEnv();
+  const f = e.call('addFood', { name: 'ソイプロテイン', category: '常温', unit: 'g', tracked: true });
+  const g = e.call('addFood', { name: 'オートミール', category: '乾物', unit: 'g', tracked: true });
+
+  ok('はじめは何も設定されていない',
+     Object.keys(e.call('bootstrap', {}).servings).length === 0);
+
+  e.call('setServing', { foodId: f.food.id, per: 30 });
+  e.call('setServing', { foodId: g.food.id, per: 40 });
+  const sv = e.call('bootstrap', {}).servings;
+  ok('食材ごとに持てる', sv[f.food.id] === 30 && sv[g.food.id] === 40, sv);
+
+  // 0を渡したら「設定なし」に戻る。片方だけ消えて、もう片方は残る
+  e.call('setServing', { foodId: f.food.id, per: 0 });
+  const sv2 = e.call('bootstrap', {}).servings;
+  ok('0で消せる', sv2[f.food.id] === undefined, sv2);
+  ok('消しても他の食材は残る', sv2[g.food.id] === 40, sv2);
+
+  // 設定を入れても在庫や記録の持ち方は変わらない（gのまま）
+  const lot = e.call('addLots', { items: [{ foodId: g.food.id, qty: 1000, yen: 1000, unit: 'g', date: '2026-09-01' }] }).lots[0];
+  e.call('record', { meal: '朝', datetime: '2026-09-02 08:00:00', entries: [{ lotId: lot.id, qty: 40 }] });
+  const after = e.call('bootstrap', {}).lots.filter((l) => l.id === lot.id)[0];
+  ok('量はgのまま減る', near(after.remain, 960) && after.unit === 'g', [after.remain, after.unit]);
+
+  // 壊れた値が入っていても止まらない
+  e.call('setServing', { foodId: g.food.id, per: 'あ' });
+  ok('数でない値は設定にならない', e.call('bootstrap', {}).servings[g.food.id] === undefined);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
