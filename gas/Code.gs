@@ -94,6 +94,16 @@ const PREP_UNIT_LABEL = '%';
    「あと何食あるか」は%からは読めないので、分かるなら食のほうがいい。 */
 const PREP_SERVING_LABEL = '食';
 
+/* 食材ごとの「1食あたりの量」。
+   プロテイン1kgを30gずつ飲むように、量で持っておきたいけれど
+   「あと何食あるか」も知りたいものに使う。任意。入れなければ今までどおり。
+
+   食材シートに列を足すと既存の行の移行が必要になり、
+   移行はsetup()を手で走らせないと掛からない。
+   設定シートに「食材ID → 1食あたりの量」をまとめて1行で持てば、
+   列構成を触らずに足せるので、こちらにした。 */
+const SERVING_CONF_KEY = 'servings';
+
 
 /* =============================================================================
  * セットアップ / 移行
@@ -293,6 +303,7 @@ function dispatch_(action, p) {
     case 'setCategories': return apiSetConf_('categories', p.categories);
     case 'setOutKinds':   return apiSetConf_('outKinds', p.outKinds);
     case 'setUnits':      return apiSetConf_('units', p.units);
+    case 'setServing':    return apiSetServing_(p);
     case 'fixLot':        return apiFixLot_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
@@ -336,6 +347,7 @@ function apiBootstrap_(p) {
     categories: getListConf_('categories', DEFAULT_CATEGORIES),
     outKinds:   getListConf_('outKinds',   DEFAULT_OUT_KINDS),
     units:      getListConf_('units',      DEFAULT_UNITS),
+    servings:   getServings_(),
     meals: MEALS,
     foods: foodOut,
     lots: stock,
@@ -800,6 +812,43 @@ function apiSetConf_(key, list) {
   const out = { ok: true };
   out[key] = clean;
   return out;
+}
+
+/**
+ * 食材ごとの「1食あたりの量」を読む。{ 食材ID: 量 } を返す。
+ * 設定シートの値が壊れていても、ここで止めずに「設定なし」として扱う。
+ * 1食あたりが分からないだけで、在庫も記録も今までどおり使えるほうがいい。
+ */
+function getServings_() {
+  const raw = getConf_(SERVING_CONF_KEY);
+  if (!raw) return {};
+  try {
+    const o = JSON.parse(String(raw));
+    if (!o || typeof o !== 'object') return {};
+    const out = {};
+    Object.keys(o).forEach(function (k) {
+      const n = num_(o[k]);
+      if (n > 0) out[k] = n;
+    });
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * 1食あたりの量を決める、または消す。
+ * 0や空を渡すと「設定していない」状態に戻る（あとで気が変わっても戻せるように）。
+ */
+function apiSetServing_(p) {
+  const id = String((p && p.foodId) || '').trim();
+  if (!id) return { ok: false, error: '食材IDが空です' };
+  const per = num_(p && p.per);
+  const all = getServings_();
+  if (per > 0) all[id] = per;
+  else delete all[id];
+  setConf_(SERVING_CONF_KEY, JSON.stringify(all));
+  return { ok: true, servings: all };
 }
 
 
