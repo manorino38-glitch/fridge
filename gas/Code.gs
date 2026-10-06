@@ -80,6 +80,9 @@ const KIND = {
    *  記録開始前に食べた分など、在庫の数量だけを実態に合わせるための区分 */
   adj:   '調整',
   prep:  '作り置きへ振替',
+  /** 毎日少しずつ飲むもの（コーヒーなど）を、飲み始めた日から飲み終わった日までの
+   *  日数で割って毎日に乗せた分。食費に入る。1杯ずつの記録の代わり */
+  spread: '按分',
 };
 
 /** 食費に計上しない種別 */
@@ -103,6 +106,14 @@ const PREP_SERVING_LABEL = '食';
    設定シートに「食材ID → 1食あたりの量」をまとめて1行で持てば、
    列構成を触らずに足せるので、こちらにした。 */
 const SERVING_CONF_KEY = 'servings';
+
+/* 期間で割るもの（コーヒーなど）の、いま飲んでいる最中の一覧。
+   設定シートに「ロットID → 飲み始めた日・食事区分」をまとめて1行で持つ。
+   飲み終わったら消すので、ここに残るのは飲んでいる最中のものだけ。 */
+const PERIOD_CONF_KEY = 'periods';
+/** 按分した毎日の分を入れる食事区分と、明細に出す時刻 */
+const PERIOD_MEAL = '間食';
+const PERIOD_TIME = '15:30:00';
 
 
 /* =============================================================================
@@ -304,6 +315,9 @@ function dispatch_(action, p) {
     case 'setOutKinds':   return apiSetConf_('outKinds', p.outKinds);
     case 'setUnits':      return apiSetConf_('units', p.units);
     case 'setServing':    return apiSetServing_(p);
+    case 'startPeriod':   return apiStartPeriod_(p);
+    case 'finishPeriod':  return apiFinishPeriod_(p);
+    case 'stopPeriod':    return apiStopPeriod_(p);
     case 'fixLot':        return apiFixLot_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
@@ -319,6 +333,18 @@ function dispatch_(action, p) {
  * ===========================================================================*/
 
 function apiBootstrap_(p) {
+  // 飲んでいる最中のものがあれば、昨日までの抜けている日の分をここで埋める。
+  // アプリを開いた時点で毎日の仮の額がそろっているようにするため。
+  // 埋めるのに失敗しても表示は出したいので、ここで止めない。
+  const periods = getPeriods_();
+  if (Object.keys(periods).length) {
+    const lock = LockService.getScriptLock();
+    if (lock.tryLock(8000)) {
+      try { catchUpPeriods_(); } catch (e) { /* 次に開いたときにまた埋める */ }
+      finally { lock.releaseLock(); }
+    }
+  }
+
   const foods = readAll_('foods');
   const lots  = readAll_('lots');
 
@@ -336,8 +362,13 @@ function apiBootstrap_(p) {
   });
 
   const nameById = foodNameMap_(foods);
+  // 飲んでいる最中のものは、仮の額で残量が0になっていても一覧から消さない
+  // （「飲み終わった」を押す場所がなくなるため）
   const stock = lots
-    .filter(function (l) { return String(l['状態']) === '在庫あり' && num_(l['残量']) > 0; })
+    .filter(function (l) {
+      if (periods[String(l['ロットID'])]) return true;
+      return String(l['状態']) === '在庫あり' && num_(l['残量']) > 0;
+    })
     .map(function (l) { return lotOut_(l, nameById); });
 
   return {
@@ -348,6 +379,7 @@ function apiBootstrap_(p) {
     outKinds:   getListConf_('outKinds',   DEFAULT_OUT_KINDS),
     units:      getListConf_('units',      DEFAULT_UNITS),
     servings:   getServings_(),
+    periods:    periodsOut_(),
     meals: MEALS,
     foods: foodOut,
     lots: stock,
@@ -694,6 +726,11 @@ function apiDeleteRecord_(p) {
   const c = all.filter(function (x) { return String(x['消費ID']) === id; })[0];
   if (!c) return { ok: false, error: 'その記録が見つかりません' };
 
+  // 按分の行を1日だけ消すと、合計が買った値段と合わなくなる
+  if (String(c['種別']) === KIND.spread) {
+    return { ok: false, error: '「' + String(c['品名']) + '」の毎日の分は、冷蔵庫の「飲み終わった」か「飲み始めを取り消す」で直してください' };
+  }
+
   const removed = {
     kind: String(c['種別']), name: String(c['品名']),
     qty: num_(c['使用量']), unit: String(c['単位'] || ''), yen: num_(c['金額']),
@@ -840,6 +877,308 @@ function getServings_() {
  * 1食あたりの量を決める、または消す。
  * 0や空を渡すと「設定していない」状態に戻る（あとで気が変わっても戻せるように）。
  */
+/* =============================================================================
+ * 期間で割るもの（コーヒーなど）
+ *
+ * 1杯ずつ記録すると漏れが出るものは、飲み始めた日と飲み終わった日だけを記録して、
+ * そのあいだの日数で割って毎日の食費に乗せる。
+ *
+ *   飲み始める … その日から毎日「1杯分」を仮に乗せていく（金額÷杯数）
+ *                 杯数は内容量。gで持っているものは「1食あたり」で割る
+ *                 仮の額の合計が残りの金額に届いたら、それ以上は乗せない
+ *   飲み終わる … 仮に乗せた分を全部ならし直して、始めた日から終わった日まで同じ額にする
+ *   取り消す   … 仮に乗せた分を全部消して、残量を元に戻す
+ *
+ * 毎日の分は消費シートに種別「按分」で1日1行書く。
+ * 実際の行として持つので、サマリー・日ごとの明細・カレンダーはそのまま使える。
+ * 合計は必ずそのロットの残りの金額ちょうどになる（数え間違いがあっても）。
+ * ===========================================================================*/
+
+function getPeriods_() {
+  const raw = getConf_(PERIOD_CONF_KEY);
+  if (!raw) return {};
+  try {
+    const o = JSON.parse(String(raw));
+    return (o && typeof o === 'object') ? o : {};
+  } catch (e) {
+    return {};
+  }
+}
+function setPeriods_(o) { setConf_(PERIOD_CONF_KEY, JSON.stringify(o || {})); }
+
+/**
+ * 画面に渡す形。飲み始めた日に加えて、ここまでに仮に乗せた量（spent）と
+ * 1日に乗せる量（per）を付ける。飲み終わる前に「1日あたりいくらになるか」を
+ * 画面側で出すのに使う（ならす量 = 残量 + spent）。
+ */
+function periodsOut_() {
+  const periods = getPeriods_();
+  const ids = Object.keys(periods);
+  if (!ids.length) return {};
+  const spent = {};
+  readAll_('cons').forEach(function (c) {
+    if (String(c['種別']) !== KIND.spread) return;
+    const id = String(c['ロットID']);
+    if (periods[id]) spent[id] = (spent[id] || 0) + num_(c['使用量']);
+  });
+  const lotsById = {};
+  readAll_('lots').forEach(function (l) { lotsById[String(l['ロットID'])] = l; });
+  const servings = getServings_();
+  const out = {};
+  ids.forEach(function (id) {
+    const lot = lotsById[id];
+    out[id] = {
+      start: periods[id].start, meal: periods[id].meal || PERIOD_MEAL,
+      spent: Math.round((spent[id] || 0) * 1000) / 1000,
+      per: lot ? periodPerDay_(lot, servings) : 0,
+    };
+  });
+  return out;
+}
+
+/** 'yyyy-MM-dd' に n 日足す。時差で日付がずれないよう UTC の暦だけで計算する */
+function addDays_(s, n) {
+  const a = String(s).split('-').map(Number);
+  const d = new Date(Date.UTC(a[0], a[1] - 1, a[2] + n));
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+/** a から b まで何日あるか（同じ日なら0） */
+function daysBetween_(a, b) {
+  const x = String(a).split('-').map(Number), y = String(b).split('-').map(Number);
+  return Math.round((Date.UTC(y[0], y[1] - 1, y[2]) - Date.UTC(x[0], x[1] - 1, x[2])) / 86400000);
+}
+function isYmd_(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
+
+/**
+ * 1日に仮に乗せる量（ロットの単位で）。
+ * 「1食あたり」を決めてあればそれ、個・本などで持っているものは1、
+ * gやmlで持っていて1食あたりが無いものは決められないので0（仮の額なし、飲み終わったときにまとめて割る）。
+ */
+function periodPerDay_(lot, servings) {
+  const per = num_(servings[String(lot['食材ID'])]);
+  if (per > 0) return per;
+  const u = String(lot['単位'] || 'g');
+  return (u === 'g' || u === 'ml') ? 0 : 1;
+}
+
+function spreadRow_(lot, date, qty, yen, meal) {
+  return rowFor_('cons', {
+    '消費ID': newId_('C'), '日時': date + ' ' + PERIOD_TIME, '日付': date,
+    'ロットID': String(lot['ロットID']), '食材ID': String(lot['食材ID']), '品名': String(lot['品名']),
+    '単位': String(lot['単位'] || 'g'), '使用量': qty, '金額': yen,
+    '食事区分': meal || PERIOD_MEAL, '種別': KIND.spread, '振替先ロットID': '', '作成日時': nowStr_(),
+  });
+}
+
+/**
+ * 飲んでいる最中のものについて、飲み始めた日から今日までで、まだ仮の額が入っていない日を埋める。
+ * ロックは呼ぶ側で取ること（ここでは取らない。スクリプトロックは入れ子にできない）。
+ * onlyLotId を渡すとそのロットだけ埋める。
+ */
+function catchUpPeriods_(onlyLotId) {
+  const periods = getPeriods_();
+  const ids = Object.keys(periods).filter(function (id) { return !onlyLotId || id === onlyLotId; });
+  if (!ids.length) return;
+
+  const lotsById = {};
+  readAll_('lots').forEach(function (l) { lotsById[String(l['ロットID'])] = l; });
+  const servings = getServings_();
+  const today = today_();
+
+  const doneDays = {};   // ロットID -> { 日付: true }
+  readAll_('cons').forEach(function (c) {
+    if (String(c['種別']) !== KIND.spread) return;
+    const id = String(c['ロットID']);
+    (doneDays[id] = doneDays[id] || {})[d2s_(c['日付'])] = true;
+  });
+
+  const newRows = [], remainEdits = [];
+  ids.forEach(function (id) {
+    const pr = periods[id];
+    const lot = lotsById[id];
+    if (!lot || !isYmd_(pr.start)) return;
+    const per = periodPerDay_(lot, servings);
+    if (!(per > 0)) return;
+
+    const perU = num_(lot['円/単位']);
+    let remain = num_(lot['残量']);
+    const done = doneDays[id] || {};
+    let changed = false;
+    for (let d = pr.start; d <= today; d = addDays_(d, 1)) {
+      if (done[d]) continue;
+      if (remain <= 0.0005) break;   // 残りの金額まで乗せきったら、それ以上は乗せない
+      const q = Math.round(Math.min(per, remain) * 1000) / 1000;
+      newRows.push(spreadRow_(lot, d, q, r2_(q * perU), pr.meal));
+      remain = Math.max(0, Math.round((remain - q) * 1000) / 1000);
+      changed = true;
+    }
+    // 残量が0になっても、飲み終わるまでは「在庫あり」のまま置いておく
+    if (changed) remainEdits.push({ row: lot._row, remain: remain, status: '在庫あり' });
+  });
+
+  if (!newRows.length) return;
+  const shCons = sheet_('cons');
+  const at = shCons.getLastRow() + 1;
+  ensureRoom_(shCons, at + newRows.length - 1, HEADERS.cons.length);
+  shCons.getRange(at, 1, newRows.length, HEADERS.cons.length).setValues(newRows);
+  writeRemains_(sheet_('lots'), remainEdits);
+}
+
+/** 飲み始める。その日から今日までの仮の額をすぐ入れる */
+function apiStartPeriod_(p) {
+  const lotId = String((p && p.lotId) || '');
+  const start = String((p && p.start) || today_());
+  if (!isYmd_(start)) return { ok: false, error: '飲み始めた日の形が正しくありません' };
+  if (start > today_()) return { ok: false, error: '飲み始めた日が未来になっています' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const lot = readAll_('lots').filter(function (l) { return String(l['ロットID']) === lotId; })[0];
+    if (!lot) return { ok: false, error: 'そのロットが見つかりません' };
+    if (!(num_(lot['残量']) > 0)) return { ok: false, error: 'もう残りがありません' };
+    if (start < d2s_(lot['日付'])) return { ok: false, error: '買った日より前から飲み始めることはできません' };
+
+    const periods = getPeriods_();
+    if (periods[lotId]) return { ok: false, error: 'もう飲み始めています' };
+    periods[lotId] = { start: start, meal: PERIOD_MEAL };
+    setPeriods_(periods);
+
+    catchUpPeriods_(lotId);
+    return periodResult_();
+  } finally { lock.releaseLock(); }
+}
+
+/**
+ * 飲み終わる。仮に乗せた分を全部まとめて、飲み始めた日から end までの日数で割り直す。
+ * 割り切れない端数は最後の日に寄せて、合計がぴったり残りの金額になるようにする。
+ */
+function apiFinishPeriod_(p) {
+  const lotId = String((p && p.lotId) || '');
+  const end = String((p && p.end) || today_());
+  if (!isYmd_(end)) return { ok: false, error: '飲み終わった日の形が正しくありません' };
+  if (end > today_()) return { ok: false, error: '飲み終わった日が未来になっています' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const periods = getPeriods_();
+    const pr = periods[lotId];
+    if (!pr) return { ok: false, error: 'まだ飲み始めていません' };
+    if (end < pr.start) return { ok: false, error: '飲み終わった日が、飲み始めた日より前になっています' };
+
+    const lot = readAll_('lots').filter(function (l) { return String(l['ロットID']) === lotId; })[0];
+    if (!lot) return { ok: false, error: 'そのロットが見つかりません' };
+
+    const rows = readAll_('cons')
+      .filter(function (c) { return String(c['種別']) === KIND.spread && String(c['ロットID']) === lotId; })
+      .sort(function (a, b) { return a._row - b._row; });
+
+    const perU = num_(lot['円/単位']);
+    const spent = rows.reduce(function (a, c) { return a + num_(c['使用量']); }, 0);
+    const R = Math.round((num_(lot['残量']) + spent) * 1000) / 1000;    // ならす量（ロットの単位）
+    const total = r2_(R * perU);                                          // ならす金額
+    const D = daysBetween_(pr.start, end) + 1;
+
+    // 1日ずつの量と金額。端数は最後の日に寄せる
+    const qEach = Math.floor(R / D * 1000) / 1000;
+    const yEach = Math.floor(total / D * 100) / 100;
+    const plan = [];
+    for (let i = 0; i < D; i++) {
+      const last = (i === D - 1);
+      plan.push({
+        date: addDays_(pr.start, i),
+        qty: last ? Math.round((R - qEach * (D - 1)) * 1000) / 1000 : qEach,
+        yen: last ? r2_(total - yEach * (D - 1)) : yEach,
+      });
+    }
+
+    const shCons = sheet_('cons');
+    const W = HEADERS.cons.length;
+    const keep = Math.min(rows.length, D);
+
+    // すでにある行は、範囲をまとめて読んで差し替え、一度で書き戻す
+    if (keep > 0) {
+      const top = rows[0]._row, bottom = rows[keep - 1]._row;
+      const rng = shCons.getRange(top, 1, bottom - top + 1, W);
+      const vals = rng.getValues();
+      const ci = { date: idx_('cons', '日付'), dt: idx_('cons', '日時'), q: idx_('cons', '使用量'),
+                   y: idx_('cons', '金額'), meal: idx_('cons', '食事区分') };
+      for (let i = 0; i < keep; i++) {
+        const v = vals[rows[i]._row - top];
+        v[ci.date] = plan[i].date;
+        v[ci.dt] = plan[i].date + ' ' + PERIOD_TIME;
+        v[ci.q] = plan[i].qty;
+        v[ci.y] = plan[i].yen;
+        v[ci.meal] = pr.meal || PERIOD_MEAL;
+      }
+      rng.setValues(vals);
+    }
+    // 足りない日は書き足す
+    if (D > keep) {
+      const add = plan.slice(keep).map(function (x) { return spreadRow_(lot, x.date, x.qty, x.yen, pr.meal); });
+      const at = shCons.getLastRow() + 1;
+      ensureRoom_(shCons, at + add.length - 1, W);
+      shCons.getRange(at, 1, add.length, W).setValues(add);
+    }
+    // 終わった日より後の分が先に入っていたら消す（後ろの行から）
+    rows.slice(keep).map(function (c) { return c._row; })
+        .sort(function (a, b) { return b - a; })
+        .forEach(function (r) { shCons.deleteRow(r); });
+
+    writeRemains_(sheet_('lots'), [{ row: lot._row, remain: 0, status: '使い切り' }]);
+
+    delete periods[lotId];
+    setPeriods_(periods);
+
+    const out = periodResult_();
+    out.finished = { name: String(lot['品名']), days: D, total: total, perDay: r2_(total / D) };
+    return out;
+  } finally { lock.releaseLock(); }
+}
+
+/** 飲み始めを取り消す。仮に乗せた分を全部消して、残量を元に戻す */
+function apiStopPeriod_(p) {
+  const lotId = String((p && p.lotId) || '');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const periods = getPeriods_();
+    if (!periods[lotId]) return { ok: false, error: 'まだ飲み始めていません' };
+    const lot = readAll_('lots').filter(function (l) { return String(l['ロットID']) === lotId; })[0];
+
+    const rows = readAll_('cons')
+      .filter(function (c) { return String(c['種別']) === KIND.spread && String(c['ロットID']) === lotId; });
+    const back = rows.reduce(function (a, c) { return a + num_(c['使用量']); }, 0);
+    const shCons = sheet_('cons');
+    rows.map(function (c) { return c._row; })
+        .sort(function (a, b) { return b - a; })
+        .forEach(function (r) { shCons.deleteRow(r); });
+
+    if (lot) {
+      const val = Math.min(num_(lot['内容量']), Math.round((num_(lot['残量']) + back) * 1000) / 1000);
+      writeRemains_(sheet_('lots'), [{ row: lot._row, remain: val, status: val > 0 ? '在庫あり' : '使い切り' }]);
+    }
+    delete periods[lotId];
+    setPeriods_(periods);
+    return periodResult_();
+  } finally { lock.releaseLock(); }
+}
+
+/** 期間まわりの操作のあとに返すもの。画面をまるごと描き直せるだけ返す */
+function periodResult_() {
+  const nameById = foodNameMap_(readAll_('foods'));
+  const periods = getPeriods_();
+  const lots = readAll_('lots')
+    .filter(function (l) {
+      if (periods[String(l['ロットID'])]) return true;
+      return String(l['状態']) === '在庫あり' && num_(l['残量']) > 0;
+    })
+    .map(function (l) { return lotOut_(l, nameById); });
+  return { ok: true, periods: periodsOut_(), lots: lots,
+           summary: buildSummary_(today_().slice(0, 7)), day: buildDay_(today_()) };
+}
+
 function apiSetServing_(p) {
   const id = String((p && p.foodId) || '').trim();
   if (!id) return { ok: false, error: '食材IDが空です' };
