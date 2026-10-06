@@ -306,6 +306,12 @@ select{width:100%;height:50px;padding:0 13px;border:1.5px solid var(--line-2);bo
   font-style:normal;font-weight:700;pointer-events:none}
 .allb{height:44px;width:38px;border:1.5px solid var(--line-2);border-radius:11px;font-size:13px;font-weight:800;color:var(--ink-2)}
 .allb.on{background:var(--accent);border-color:var(--accent);color:#fff}
+/* 期間で割っている最中の行。入力欄の代わりに「飲み終わった」だけを置く */
+.row.period{grid-template-columns:1fr auto;background:repeating-linear-gradient(90deg,transparent,transparent 3px,var(--surface-2) 3px,var(--surface-2) 4px)}
+.row.period .nm .s{color:var(--accent);font-weight:700}
+.pfin{height:44px;padding:0 14px;border-radius:11px;background:var(--accent);color:#fff;font-size:13px;font-weight:800;white-space:nowrap}
+.pbtn{display:block;width:100%;height:40px;margin-top:10px;border:1.5px dashed var(--line-2);border-radius:11px;
+  font-size:13px;font-weight:700;color:var(--ink-2);background:var(--surface)}
 .detail{padding:4px 13px 14px;background:var(--surface-2);border-bottom:1px solid var(--line)}
 .detail .lab{font-size:11px;color:var(--ink-2);margin:10px 0 6px;font-weight:800;letter-spacing:.04em}
 .lotbtn{display:block;width:100%;text-align:left;border:1.5px solid var(--line-2);border-radius:11px;
@@ -446,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-09-30a';
+var APP_VERSION = '2026-10-06a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -609,6 +615,7 @@ var S = {
   categories: [], foods: [], lots: [], meals: ['朝','昼','夕','間食'], outKinds: [], units: ['g','ml','個','本','枚'],
   summary: null, day: null, serverDate: '', ym: '',
   servings: {},            // 食材ID -> 1食あたりの量（任意。入っているものだけ「あと何食」を出す）
+  periods: {},             // ロットID -> { start, meal, spent, per }  期間で割っている最中のもの
   meal: '夕', mealTouched: false,
   recDate: '', recDateTouched: false,   // 冷蔵庫タブの記録日。既定は今日
   ent: {}, kind: {}, sel: {}, open: null,
@@ -643,6 +650,11 @@ function pad(n) { return (n < 10 ? '0' : '') + n; }
 function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
 function nowStr() { var d = new Date(); return todayStr() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
 function opId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+/** 'yyyy-mm-dd' の a から b まで何日あるか（同じ日なら0） */
+function daysBetween(a, b) {
+  var x = String(a).split('-').map(Number), y = String(b).split('-').map(Number);
+  return Math.round((Date.UTC(y[0], y[1] - 1, y[2]) - Date.UTC(x[0], x[1] - 1, x[2])) / 86400000);
+}
 function fmtMD(d) { var p = String(d).split('-'); return p.length === 3 ? (Number(p[1]) + '/' + Number(p[2])) : d; }
 /** レシートの見出し用。今年なら月日だけ、去年以前なら年も出す */
 function fmtReceiptDate(d) {
@@ -813,6 +825,7 @@ function applyBootstrap(r) {
   S.outKinds = r.outKinds || [];
   S.units = r.units || S.units;
   S.servings = r.servings || {};
+  S.periods = r.periods || {};
   S.summary = r.summary;
   if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
@@ -836,7 +849,8 @@ function foodById(id) { for (var i = 0; i < S.foods.length; i++) if (S.foods[i].
 function stockByFood() {
   var m = {};
   S.lots.forEach(function (l) {
-    if (l.status !== '在庫あり' || !(l.remain > 0.0005)) return;
+    // 期間で割っている最中のものは、仮の額で残りが0になっていても出す（飲み終わったを押す場所）
+    if (!S.periods[l.id] && (l.status !== '在庫あり' || !(l.remain > 0.0005))) return;
     (m[l.foodId] = m[l.foodId] || []).push(l);
   });
   Object.keys(m).forEach(function (k) {
@@ -847,6 +861,8 @@ function stockByFood() {
 function currentLot(foodId, lots) {
   var want = S.sel[foodId];
   if (want) for (var i = 0; i < lots.length; i++) if (lots[i].id === want) return lots[i];
+  // 飲み始めているロットがあれば、それを表に出す
+  for (var j = 0; j < lots.length; j++) if (S.periods[lots[j].id]) return lots[j];
   return lots[0];
 }
 
@@ -982,14 +998,18 @@ function todayHtml() {
     list = d.items.map(function (x) {
       var qty = x.qty ? '<span>' + esc(fmtQty(x.qty, x.unit)) + '</span>' : '';
       var tag = '';
+      var isSpread = (x.kind === '按分');
       if (!x.counted) tag = '<span class="tag">' + esc(x.kind === '作り置きへ振替' ? '作り置きへ' : x.kind) + '</span>';
       else if (x.from === '在庫外') tag = '<span class="tag">' + esc(x.kind) + '</span>';
+      else if (isSpread) tag = '<span class="tag">按分</span>';
       return '<div class="it' + (x.counted ? '' : ' off') + '">' +
         '<span class="tm">' + esc(x.time || '') + '</span>' +
         '<span class="g"><b>' + esc(x.name) + '</b>' + qty + tag +
           (x.meal ? '<span>' + esc(x.meal) + '</span>' : '') + '</span>' +
         '<span class="amt">' + (x.counted ? yen(x.yen) : '<span style="color:var(--ink-3)">—</span>') + '</span>' +
-        '<button class="del" data-del="' + esc(x.id) + '" aria-label="この記録を消す">✕</button>' +
+        // 按分の1日だけを消すと合計が合わなくなるので、ここからは消させない（冷蔵庫の行で直す）
+        (isSpread ? '<span class="del" aria-hidden="true"></span>'
+                  : '<button class="del" data-del="' + esc(x.id) + '" aria-label="この記録を消す">✕</button>') +
         '</div>';
     }).join('');
   }
@@ -1454,6 +1474,7 @@ function rowHtml(foodId, lots, cat) {
   var name = (f && f.name) || lot.name;
   var unit = lot.unit || (f && f.unit) || 'g';
   var isPrep = (cat === '作り置き');
+  if (S.periods[lot.id]) return periodRowHtml(foodId, lots, lot, name);
   // 作り置きでも、食数で持っているものは数量欄を出す（「1食」と入れたい）
   var isPct = isPrep && unit === '%';
   var pctLeft = lot.qty ? Math.round(lot.remain / lot.qty * 100) : 0;
@@ -1519,8 +1540,171 @@ function rowHtml(foodId, lots, cat) {
       ' で ' + fmtMD(lot.date) + ' 購入</div>' +
     '<button class="lnk" data-act="fixyen" data-lot="' + esc(lot.id) + '">金額を直す</button>' +
     (isPrep ? '' : '　<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
+    (isPrep ? '' : '<button class="pbtn" data-act="pstart">毎日少しずつ飲むものにする（期間で割る）</button>') +
     '</div>';
   return row + detail;
+}
+
+/* ---- 期間で割っている最中の行 --------------------------------------------
+ * 1杯ずつ入れる代わりに、飲み始めた日と飲み終わった日だけを記録するもの。
+ * 毎日の入力欄は出さず、「飲み終わった」だけを置く。
+ * ------------------------------------------------------------------------*/
+function periodPerDayYen(lot) {
+  var pr = S.periods[lot.id];
+  return pr && pr.per > 0 ? pr.per * lot.perU : 0;
+}
+function periodRowHtml(foodId, lots, lot, name) {
+  var pr = S.periods[lot.id];
+  var dayN = daysBetween(pr.start, S.serverDate || todayStr()) + 1;
+  var sub = fmtMD(pr.start) + 'から飲み中 · ' + dayN + '日目';
+  if (!(pr.per > 0)) sub += ' · 飲み終わったらまとめて割ります';
+  else if (!(lot.remain > 0.0005)) sub += ' · 仮の額は値段まで入りました';
+  else sub += ' · 仮に1日' + yen1(periodPerDayYen(lot));
+
+  var badge = lots.length > 1 ? '<em class="lotb">' + lots.length + '</em>' : '';
+  var row =
+    '<div class="row period" data-food="' + esc(foodId) + '" data-lot="' + esc(lot.id) + '">' +
+      '<button class="nm" data-act="detail"><span class="t">' + esc(name) + badge + '</span>' +
+        '<span class="s">' + esc(sub) + '</span></button>' +
+      '<button class="pfin" data-act="pfinish">飲み終わった</button>' +
+    '</div>';
+  if (S.open !== foodId) return row;
+
+  var detail = '<div class="detail" data-food="' + esc(foodId) + '">';
+  if (lots.length > 1) {
+    detail += '<div class="lab">どのロットを見るか</div>' +
+      lots.map(function (l) {
+        return '<button class="lotbtn' + (l.id === lot.id ? ' on' : '') + '" data-act="pick" data-pick="' + esc(l.id) + '">' +
+          fmtMD(l.date) + ' · ' + fmtQty(l.remain, l.unit) + ' / ' + fmtQty(l.qty, l.unit) +
+          (S.periods[l.id] ? '　<span style="color:var(--accent)">飲み中</span>' : '') + '</button>';
+      }).join('');
+  }
+  detail +=
+    '<div class="lab" style="line-height:1.7">毎日の分は「間食」に入っています。' +
+      '飲み終わった日を入れると、' + esc(fmtMD(pr.start)) + 'からその日までの日数で割り直します。</div>' +
+    '<div class="lab" style="margin-top:12px">このロット: ' + fmtQty(lot.qty, lot.unit) + ' / ' + yen(lot.yen) +
+      ' で ' + fmtMD(lot.date) + ' 購入</div>' +
+    '<button class="lnk" data-act="fixyen" data-lot="' + esc(lot.id) + '">金額を直す</button>' +
+    '　<button class="lnk" data-act="pstop">飲み始めを取り消す</button>' +
+    '</div>';
+  return row + detail;
+}
+
+/** 1日に仮に乗せる量。サーバと同じ決め方（1食あたり → 個などは1 → g/mlで無ければ0） */
+function periodPerGuess(lot) {
+  var per = servingPer(lot.foodId);
+  if (per) return per;
+  return isBulk(lot.unit) ? 0 : 1;
+}
+
+function showStartPeriod(lot) {
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+  var today = S.serverDate || todayStr();
+  var per = periodPerGuess(lot);
+  var used = lot.qty - lot.remain > 0.0005;
+
+  openSheet(
+    '<h3>毎日少しずつ飲むものにする</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">残り ' + esc(fmtQty(lot.remain, lot.unit)) + '（' + yen(lot.remain * lot.perU) + ' 分）</div></div>' +
+    '<p class="small muted" style="margin:-4px 0 14px;line-height:1.8">' +
+      '1杯ずつ記録する代わりに、飲み始めた日と飲み終わった日だけを記録します。' +
+      '飲み終わったら、そのあいだの日数で割って毎日の「間食」に入れます。' +
+      (used ? 'これまでに記録した分はそのまま残り、残りの分だけを割ります。' : '') + '</p>' +
+    '<label class="fld"><span>飲み始めた日</span>' +
+      '<input id="psD" type="date" value="' + esc(today) + '" min="' + esc(lot.date) + '" max="' + esc(today) + '"></label>' +
+    '<div class="perg" id="psOut">' +
+      (per > 0
+        ? '飲み終わるまでは、1日' + yen1(per * lot.perU) + 'ずつ仮に入ります（1日' + esc(fmtQty(per, lot.unit)) + 'の計算）'
+        : '1食あたりが決まっていないので、仮の額は入れず、飲み終わったときにまとめて割ります') + '</div>' +
+    '<button class="btn" id="psGo">飲み始める</button>' +
+    '<div style="height:9px"></div><button class="btn quiet" id="psNo">やめる</button>'
+  );
+  $('#psNo').onclick = closeSheet;
+  $('#psGo').onclick = function () {
+    var d = $('#psD').value;
+    if (!d) return toastErr('飲み始めた日を入れてください');
+    var b = $('#psGo'); b.disabled = true; b.textContent = '始めています…';
+    call('startPeriod', { lotId: lot.id, start: d }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '始められませんでした');
+      closeSheet(); S.open = null; S.dayCache = {};
+      return refresh(true).then(function () { toast(name + ' を ' + fmtMD(d) + ' から飲み始めました'); });
+    }).catch(function (e) {
+      var b2 = $('#psGo'); if (b2) { b2.disabled = false; b2.textContent = '飲み始める'; }
+      toastErr((e && e.message) || '始められませんでした');
+    });
+  };
+}
+
+function showFinishPeriod(lot) {
+  var pr = S.periods[lot.id];
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+  var today = S.serverDate || todayStr();
+  var amount = (lot.remain + (pr.spent || 0)) * lot.perU;   // ならす金額
+
+  openSheet(
+    '<h3>飲み終わった</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">' + esc(fmtMD(pr.start)) + 'から飲み始め · ならす金額 ' + yen(amount) + '</div></div>' +
+    '<label class="fld"><span>飲み終わった日</span>' +
+      '<input id="pfD" type="date" value="' + esc(today) + '" min="' + esc(pr.start) + '" max="' + esc(today) + '"></label>' +
+    '<div class="perg" id="pfOut">&nbsp;</div>' +
+    '<button class="btn" id="pfGo">この日で飲み終わり</button>' +
+    '<div style="height:9px"></div><button class="btn quiet" id="pfNo">やめる</button>'
+  );
+  var paint = function () {
+    var v = $('#pfD').value, el = $('#pfOut');
+    if (!v || v < pr.start) { el.textContent = '飲み始めた日より後の日を入れてください'; return; }
+    var days = daysBetween(pr.start, v) + 1;
+    el.textContent = days + '日で飲み終わり · 1日あたり' + yen1(amount / days);
+  };
+  $('#pfD').oninput = paint; $('#pfD').onchange = paint; paint();
+  $('#pfNo').onclick = closeSheet;
+  $('#pfGo').onclick = function () {
+    var d = $('#pfD').value;
+    if (!d) return toastErr('飲み終わった日を入れてください');
+    var b = $('#pfGo'); b.disabled = true; b.textContent = '割り直しています…';
+    call('finishPeriod', { lotId: lot.id, end: d }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '割り直せませんでした');
+      closeSheet(); S.open = null; S.dayCache = {};
+      var fin = r.finished || {};
+      return refresh(true).then(function () {
+        toast(name + ' は ' + fin.days + '日で飲み終わり（1日あたり' + yen1(fin.perDay) + '）');
+      });
+    }).catch(function (e) {
+      var b2 = $('#pfGo'); if (b2) { b2.disabled = false; b2.textContent = 'この日で飲み終わり'; }
+      toastErr((e && e.message) || '割り直せませんでした');
+    });
+  };
+}
+
+function showStopPeriod(lot) {
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+  openSheet(
+    '<h3>飲み始めを取り消す</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">' + esc(fmtMD(S.periods[lot.id].start)) + 'から飲み中</div></div>' +
+    '<p class="small muted" style="margin:-4px 0 14px;line-height:1.8">' +
+      '毎日入っていた仮の分を全部消して、残りの量を元に戻します。' +
+      '飲み始める前に1杯ずつ記録した分はそのまま残ります。</p>' +
+    '<button class="btn" id="ptGo">取り消す</button>' +
+    '<div style="height:9px"></div><button class="btn quiet" id="ptNo">やめる</button>'
+  );
+  $('#ptNo').onclick = closeSheet;
+  $('#ptGo').onclick = function () {
+    var b = $('#ptGo'); b.disabled = true; b.textContent = '取り消しています…';
+    call('stopPeriod', { lotId: lot.id }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '取り消せませんでした');
+      closeSheet(); S.open = null; S.dayCache = {};
+      return refresh(true).then(function () { toast(name + ' の飲み始めを取り消しました'); });
+    }).catch(function (e) {
+      var b2 = $('#ptGo'); if (b2) { b2.disabled = false; b2.textContent = '取り消す'; }
+      toastErr((e && e.message) || '取り消せませんでした');
+    });
+  };
 }
 
 $('#v-fridge').addEventListener('change', function (e) {
@@ -1551,6 +1735,9 @@ $('#v-fridge').addEventListener('click', function (e) {
   if (act === 'pick')   { S.sel[foodId] = btn.dataset.pick; renderFridge(); renderFoot(); return; }
   if (act === 'editfood') { showEditFood(foodId); return; }
   if (act === 'fixyen') { showFixYen(btn.dataset.lot); return; }
+  if (act === 'pstart')  { showStartPeriod(lot); return; }
+  if (act === 'pfinish') { showFinishPeriod(lot); return; }
+  if (act === 'pstop')   { showStopPeriod(lot); return; }
   if (act === 'all' || act === 'all2') {
     var cur = S.ent[lot.id] || 0;
     if (Math.abs(cur - lot.remain) < 0.005) delete S.ent[lot.id];
