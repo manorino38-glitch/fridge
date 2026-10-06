@@ -395,6 +395,112 @@ section('1食あたりの量');
   ok('数でない値は設定にならない', e.call('bootstrap', {}).servings[g.food.id] === undefined);
 }
 
+/* ------------------------------------------------------------------ */
+section('期間で割る（コーヒー）：途中から切り替えて、飲み終わりでならす');
+{
+  const e = newEnv('2026-10-06T03:00:00Z');   // 10/06 12:00 JST
+  const f = e.call('addFood', { name: 'コーヒー100個', category: '常温', unit: '個', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 100, yen: 1500, unit: '個', date: '2026-09-20' }] }).lots[0];
+  // 切り替える前に1杯ずつ記録していた分（10杯）
+  e.call('record', { meal: '朝', datetime: '2026-09-25 08:00:00', entries: [{ lotId: lot.id, qty: 10 }] });
+
+  const st = e.call('startPeriod', { lotId: lot.id, start: '2026-10-06' });
+  ok('飲み始められる', st.ok === true, st.error);
+  const spreadRows = () => e.rows('消費').filter((c) => c['種別'] === '按分');
+  ok('今日の分がすぐ入る', spreadRows().length === 1 && near(spreadRows()[0]['金額'], 15), spreadRows().map((c) => c['金額']));
+  ok('間食に入る', spreadRows()[0]['食事区分'] === '間食');
+  ok('飲み中の一覧に出る', !!e.call('bootstrap', {}).periods[lot.id]);
+
+  // 4日進めて開くと、抜けた日が埋まる
+  e.setNow('2026-10-10T03:00:00Z');
+  const b = e.call('bootstrap', {});
+  ok('開いたら抜けた日が埋まる', spreadRows().length === 5, spreadRows().map((c) => c['日付']));
+  ok('同じ日は二重に入らない', (e.call('bootstrap', {}), spreadRows().length === 5));
+  ok('残量も1杯ずつ減る', near(b.lots.filter((l) => l.id === lot.id)[0].remain, 85));
+  ok('画面に仮の量と1日の量を渡す', near(b.periods[lot.id].spent, 5) && b.periods[lot.id].per === 1 && b.periods[lot.id].start === '2026-10-06', b.periods[lot.id]);
+
+  // 5日で飲み終わった
+  const fin = e.call('finishPeriod', { lotId: lot.id, end: '2026-10-10' });
+  ok('飲み終われる', fin.ok === true, fin.error);
+  ok('日数と1日あたりが返る', fin.finished.days === 5 && near(fin.finished.perDay, 270), fin.finished);
+  const rows = spreadRows();
+  ok('毎日同じ額にならす', rows.length === 5 && rows.every((c) => near(c['金額'], 270)), rows.map((c) => c['金額']));
+  const all = e.rows('消費').filter((c) => c['ロットID'] === lot.id).reduce((a, c) => a + Number(c['金額']), 0);
+  ok('前の記録と合わせて、ちょうど買った値段', near(all, 1500), all);
+  const l2 = e.rows('仕入').filter((l) => l['ロットID'] === lot.id)[0];
+  ok('使い切りになる', Number(l2['残量']) === 0 && l2['状態'] === '使い切り', [l2['残量'], l2['状態']]);
+  ok('飲み中の一覧から消える', !e.call('bootstrap', {}).periods[lot.id]);
+  ok('10月の食費にも入っている', near(e.call('summary', { ym: '2026-10' }).summary.byMeal['間食'], 1350));
+}
+
+section('期間で割る：杯数を過ぎても値段を超えない');
+{
+  const e = newEnv('2026-10-01T03:00:00Z');
+  const f = e.call('addFood', { name: 'ドリップ3個', category: '常温', unit: '個', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 3, yen: 300, unit: '個', date: '2026-10-01' }] }).lots[0];
+  e.call('startPeriod', { lotId: lot.id, start: '2026-10-01' });
+  e.setNow('2026-10-07T03:00:00Z');
+  const b = e.call('bootstrap', {});
+  const rows = () => e.rows('消費').filter((c) => c['種別'] === '按分');
+  ok('仮の額は3日分で止まる', rows().length === 3, rows().map((c) => c['日付']));
+  ok('残り0でも一覧から消えない', b.lots.some((l) => l.id === lot.id));
+  const fin = e.call('finishPeriod', { lotId: lot.id, end: '2026-10-07' });
+  ok('飲み終わったら7日に割り直す', fin.ok && rows().length === 7, fin.error || rows().length);
+  ok('合計はちょうど値段', near(rows().reduce((a, c) => a + Number(c['金額']), 0), 300));
+}
+
+section('期間で割る：割り切れない端数、さかのぼった終わり、取り消し');
+{
+  const e = newEnv('2026-10-01T03:00:00Z');
+  const f = e.call('addFood', { name: 'コーヒー粉', category: '常温', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 200, yen: 1000, unit: 'g', date: '2026-10-01' }] }).lots[0];
+  const rows = () => e.rows('消費').filter((c) => c['種別'] === '按分');
+
+  // gで持っていて1食あたりが無いと、仮の額は入れない
+  e.call('startPeriod', { lotId: lot.id, start: '2026-10-01' });
+  ok('1食あたりが無いgは仮の額なし', rows().length === 0);
+  e.call('stopPeriod', { lotId: lot.id });
+
+  // 1食あたりを決めれば仮の額が入る
+  e.call('setServing', { foodId: f.food.id, per: 10 });
+  e.call('startPeriod', { lotId: lot.id, start: '2026-10-01' });
+  e.setNow('2026-10-05T03:00:00Z');
+  e.call('bootstrap', {});
+  ok('1食あたりで仮の額が入る', rows().length === 5 && near(rows()[0]['金額'], 50), rows().map((c) => c['金額']));
+
+  // 取り消すと全部消えて残量が戻る
+  const stop = e.call('stopPeriod', { lotId: lot.id });
+  ok('取り消せる', stop.ok === true, stop.error);
+  ok('毎日の分が消える', rows().length === 0);
+  ok('残量が戻る', near(e.rows('仕入')[0]['残量'], 200));
+
+  // 3日で飲み終わったのを、5日目に入れる（さかのぼり）。1000円 ÷ 3日は割り切れない
+  e.call('startPeriod', { lotId: lot.id, start: '2026-10-01' });
+  const fin = e.call('finishPeriod', { lotId: lot.id, end: '2026-10-03' });
+  ok('さかのぼって終われる', fin.ok === true, fin.error);
+  ok('終わった日より後の分は消える', rows().length === 3 && rows().every((c) => c['日付'] <= '2026-10-03'),
+     rows().map((c) => c['日付']));
+  ok('端数を寄せて合計ぴったり', near(rows().reduce((a, c) => a + Number(c['金額']), 0), 1000),
+     rows().map((c) => c['金額']));
+
+  // 明細から按分の1日だけを消すのは断る
+  const del = e.call('deleteRecord', { id: rows()[0]['消費ID'] });
+  ok('按分の1日だけは消せない', del.ok === false && rows().length === 3, del);
+}
+
+section('期間で割る：おかしな日付は断る');
+{
+  const e = newEnv('2026-10-06T03:00:00Z');
+  const f = e.call('addFood', { name: 'コーヒー', category: '常温', unit: '個', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 10, yen: 100, unit: '個', date: '2026-10-03' }] }).lots[0];
+  ok('未来から始められない', e.call('startPeriod', { lotId: lot.id, start: '2026-10-07' }).ok === false);
+  ok('買う前から始められない', e.call('startPeriod', { lotId: lot.id, start: '2026-10-01' }).ok === false);
+  e.call('startPeriod', { lotId: lot.id, start: '2026-10-04' });
+  ok('二重に始められない', e.call('startPeriod', { lotId: lot.id, start: '2026-10-04' }).ok === false);
+  ok('始める前の日には終われない', e.call('finishPeriod', { lotId: lot.id, end: '2026-10-03' }).ok === false);
+  ok('未来には終われない', e.call('finishPeriod', { lotId: lot.id, end: '2026-10-08' }).ok === false);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');

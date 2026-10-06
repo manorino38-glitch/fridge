@@ -129,7 +129,8 @@ class Spreadsheet {
 }
 
 function makeSandbox(opts = {}) {
-  const now = new Date(opts.now || Date.now());
+  // 日をまたぐ処理を確かめられるように、時計は後から進められる（setNow）
+  let now = new Date(opts.now || Date.now());
   let seq = 0;
 
   const ss = new Spreadsheet();
@@ -159,7 +160,7 @@ function makeSandbox(opts = {}) {
       }),
     },
     LockService: {
-      getScriptLock: () => ({ waitLock: () => true, releaseLock: () => {} }),
+      getScriptLock: () => ({ waitLock: () => true, tryLock: () => true, releaseLock: () => {} }),
     },
     Utilities: {
       getUuid: () => 'uuid-' + (++seq),
@@ -202,7 +203,8 @@ function makeSandbox(opts = {}) {
   const ctx = vm.createContext(g);
   vm.runInContext(fs.readFileSync(CODE, 'utf8'), ctx, { filename: 'Code.gs' });
 
-  return { sandbox: g, ss, props, cache, net };
+  const setNow = (iso) => { now = new Date(iso); };
+  return { sandbox: g, ss, props, cache, net, setNow };
 }
 
 module.exports = { makeSandbox };
