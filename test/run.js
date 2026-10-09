@@ -501,6 +501,87 @@ section('期間で割る：おかしな日付は断る');
   ok('未来には終われない', e.call('finishPeriod', { lotId: lot.id, end: '2026-10-08' }).ok === false);
 }
 
+section('作り置きの食数を直す');
+{
+  // まだ食べていない：最初からその食数で作ったのと同じになる
+  const e = newEnv('2026-10-09T03:00:00Z');
+  const f = e.call('addFood', { name: '米', category: '常温', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 1000, yen: 558.34, unit: 'g', date: '2026-10-09' }] }).lots[0];
+  const mk = e.call('record', { meal: '昼', datetime: '2026-10-09 12:00:00',
+                                makePrep: true, prepName: '雑穀ごはん', prepServings: 11,
+                                entries: [{ lotId: lot.id, qty: 500 }] });
+  ok('11食で作れる', mk.ok && mk.prepLot.qty === 11, mk.error);
+  const r = e.call('resizeLot', { lotId: mk.prepLot.id, qty: 10 });
+  ok('10食に直せる', r.ok === true, r.error);
+  const b = e.call('bootstrap', {});
+  const pl = b.lots.filter((l) => l.id === mk.prepLot.id)[0];
+  ok('内容量と残りが10', pl.qty === 10 && near(pl.remain, 10), pl);
+  ok('合計金額はそのまま', near(pl.yen, mk.prepLot.yen), pl.yen);
+  ok('1食あたりが引き直される', near(pl.perU, mk.prepLot.yen / 10), pl.perU);
+  ok('次に作るときの初期値も10', b.foods.filter((x) => x.name === '雑穀ごはん')[0].lastQty === 10);
+  ok('材料の米は変わらない', near(b.lots.filter((l) => l.id === lot.id)[0].remain, 500));
+}
+{
+  // 食べたあと：食べた分は残し、金額は新しい1食あたりで引き直す
+  const e = newEnv('2026-10-09T03:00:00Z');
+  const f = e.call('addFood', { name: '鶏もも肉', category: 'チルド', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 600, yen: 1100, unit: 'g', date: '2026-10-08' }] }).lots[0];
+  const mk = e.call('record', { meal: '夕', datetime: '2026-10-08 19:00:00',
+                                makePrep: true, prepName: '唐揚げ', prepServings: 11,
+                                entries: [{ lotId: lot.id, qty: 600 }] });
+  e.call('record', { meal: '昼', datetime: '2026-10-09 12:00:00', entries: [{ lotId: mk.prepLot.id, qty: 2 }] });
+  ok('2食食べると食費は200', near(e.call('summary', { ym: '2026-10' }).summary.total, 200));
+
+  ok('食べた数より少なくはできない', e.call('resizeLot', { lotId: mk.prepLot.id, qty: 1 }).ok === false);
+  const r = e.call('resizeLot', { lotId: mk.prepLot.id, qty: 10 });
+  ok('食べたあとでも直せる', r.ok === true, r.error);
+  const pl = e.call('bootstrap', {}).lots.filter((l) => l.id === mk.prepLot.id)[0];
+  ok('残りは10−2＝8', near(pl.remain, 8), pl.remain);
+  ok('食べた2食は110円ずつに引き直し', near(e.call('summary', { ym: '2026-10' }).summary.total, 220));
+  ok('引き直した明細を返す', r.cons.length === 1 && near(r.cons[0].after, 220), r.cons);
+
+  // 全部食べ切ったあとで、実は少なかった → 使い切りになる
+  e.call('record', { meal: '夕', datetime: '2026-10-09 19:00:00', entries: [{ lotId: mk.prepLot.id, qty: 8 }] });
+  const r2 = e.call('resizeLot', { lotId: mk.prepLot.id, qty: 10 });
+  ok('食べ切ったあとも同じ数なら直せる', r2.ok === true, r2.error);
+  const r3 = e.call('resizeLot', { lotId: mk.prepLot.id, qty: 12 });
+  ok('増やすと残りが戻る', r3.ok && near(r3.lot.remain, 2), r3);
+  const pl3 = e.call('bootstrap', {}).lots.filter((l) => l.id === mk.prepLot.id)[0];
+  ok('残りが戻れば在庫ありに戻る', pl3.status === '在庫あり', pl3.status);
+  ok('食べた10食の合計は食費のまま1100以下', e.call('summary', { ym: '2026-10' }).summary.total <= 1100.01);
+}
+{
+  // 作り置きを材料にして別の作り置きを作っていた：振替先の金額も差額ぶん動く
+  const e = newEnv('2026-10-09T03:00:00Z');
+  const f = e.call('addFood', { name: '米', category: '常温', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 1000, yen: 1100, unit: 'g', date: '2026-10-08' }] }).lots[0];
+  const rice = e.call('record', { meal: '昼', datetime: '2026-10-08 12:00:00',
+                                  makePrep: true, prepName: 'ごはん', prepServings: 11,
+                                  entries: [{ lotId: lot.id, qty: 1000 }] }).prepLot;
+  const oni = e.call('record', { meal: '昼', datetime: '2026-10-08 13:00:00',
+                                 makePrep: true, prepName: 'おにぎり', prepServings: 4,
+                                 entries: [{ lotId: rice.id, qty: 2 }] }).prepLot;
+  ok('おにぎりは2食ぶん200円', near(oni.yen, 200), oni.yen);
+  e.call('record', { meal: '昼', datetime: '2026-10-09 12:00:00', entries: [{ lotId: oni.id, qty: 1 }] });
+  const r = e.call('resizeLot', { lotId: rice.id, qty: 10 });
+  ok('材料になった作り置きも直せる', r.ok === true, r.error);
+  const o2 = e.call('bootstrap', {}).lots.filter((l) => l.id === oni.id)[0];
+  ok('振替先のおにぎりが220円になる', near(o2.yen, 220), o2.yen);
+  ok('おにぎりの1食あたりも55円に', near(o2.perU, 55), o2.perU);
+  ok('食べたおにぎり1個も55円に引き直し', near(e.call('summary', { ym: '2026-10' }).summary.total, 55));
+}
+{
+  const e = newEnv('2026-10-09T03:00:00Z');
+  const f = e.call('addFood', { name: '鶏もも肉', category: 'チルド', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 600, yen: 900, unit: 'g', date: '2026-10-09' }] }).lots[0];
+  const mk = e.call('record', { meal: '夕', datetime: '2026-10-09 19:00:00',
+                                makePrep: true, prepName: 'スープ',
+                                entries: [{ lotId: lot.id, qty: 300 }] });
+  ok('％の作り置きは断る', e.call('resizeLot', { lotId: mk.prepLot.id, qty: 4 }).ok === false);
+  ok('0は断る', e.call('resizeLot', { lotId: lot.id, qty: 0 }).ok === false);
+  ok('ロットIDが無ければ断る', e.call('resizeLot', { qty: 3 }).ok === false);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
