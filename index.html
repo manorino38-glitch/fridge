@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-06a';
+var APP_VERSION = '2026-10-09a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1539,6 +1539,7 @@ function rowHtml(foodId, lots, cat) {
     '<div class="lab" style="margin-top:12px">このロット: ' + fmtQty(lot.qty, unit) + ' / ' + yen(lot.yen) +
       ' で ' + fmtMD(lot.date) + ' 購入</div>' +
     '<button class="lnk" data-act="fixyen" data-lot="' + esc(lot.id) + '">金額を直す</button>' +
+    (isPrep && !isPct ? '　<button class="lnk" data-act="fixqty" data-lot="' + esc(lot.id) + '">食数を直す</button>' : '') +
     (isPrep ? '' : '　<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
     (isPrep ? '' : '<button class="pbtn" data-act="pstart">毎日少しずつ飲むものにする（期間で割る）</button>') +
     '</div>';
@@ -1735,6 +1736,7 @@ $('#v-fridge').addEventListener('click', function (e) {
   if (act === 'pick')   { S.sel[foodId] = btn.dataset.pick; renderFridge(); renderFoot(); return; }
   if (act === 'editfood') { showEditFood(foodId); return; }
   if (act === 'fixyen') { showFixYen(btn.dataset.lot); return; }
+  if (act === 'fixqty') { showFixQty(btn.dataset.lot); return; }
   if (act === 'pstart')  { showStartPeriod(lot); return; }
   if (act === 'pfinish') { showFinishPeriod(lot); return; }
   if (act === 'pstop')   { showStopPeriod(lot); return; }
@@ -2527,6 +2529,71 @@ function showFixYen(lotId) {
     }).catch(function (e) {
       var b2 = $('#fyGo');
       if (b2) { b2.disabled = false; b2.textContent = 'この金額にする'; }
+      toastErr((e && e.message) || '直せませんでした');
+    });
+  };
+}
+
+/* ---- 作り置きの食数を後から直す ----------------------------------------
+ * 「11食で登録したけど、分けてみたら10食だった」ときに使う。
+ * 合計金額はそのままで、1食あたりの値段が変わる。
+ * もう食べた分は食べた数のまま残し、残りの数だけを新しい食数に合わせる。
+ * 食べた分の金額も新しい1食あたりで引き直す。
+ * ------------------------------------------------------------------------*/
+function showFixQty(lotId) {
+  var lot = lotById(lotId);
+  if (!lot) return;
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+  var unit = lot.unit || '食';
+  var used = Math.max(0, Math.round((lot.qty - lot.remain) * 1000) / 1000);
+
+  openSheet(
+    '<h3>食数を直す</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">' + esc(fmtMD(lot.date)) + '作成　' + esc(fmtQty(lot.qty, unit)) + '　' + yen(lot.yen) +
+      '（' + esc(fmtUnitPrice(lot.perU, unit)) + '）' +
+      (used > 0 ? '<br>もう ' + esc(fmtQty(used, unit)) + ' 食べています' : '') + '</div></div>' +
+    '<label class="fld"><span>ほんとうの食数</span>' +
+      '<div class="inw"><input id="fqN" inputmode="decimal" value="' + lot.qty + '"><i>' + esc(unit) + '</i></div></label>' +
+    '<div class="perg" id="fqOut">&nbsp;</div>' +
+    '<p class="tiny muted" style="margin:2px 0 14px;line-height:1.8">' +
+      '合計の金額は変わりません。1' + esc(unit) + 'あたりの値段が変わります。<br>' +
+      '食べた分はそのまま残して、残りの数を合わせます。食べた分の金額も新しい値段で引き直します。</p>' +
+    '<button class="btn" id="fqGo">この食数にする</button>' +
+    '<div style="height:9px"></div>' +
+    '<button class="btn quiet" id="fqNo">やめる</button>'
+  );
+
+  var paint = function () {
+    var v = parseFloat($('#fqN').value);
+    var el = $('#fqOut');
+    if (!(v > 0)) { el.textContent = '数を入れてください'; return; }
+    if (v < used - 0.0005) { el.textContent = 'もう' + fmtQty(used, unit) + '食べているので、それより少なくはできません'; return; }
+    var left = Math.round((v - used) * 1000) / 1000;
+    el.textContent = fmtUnitPrice(lot.yen / v, unit) + '・残り' + fmtQty(left, unit) + ' になります';
+  };
+  $('#fqN').oninput = paint; paint();
+  setTimeout(function () { var i = $('#fqN'); if (i) { i.focus(); i.select(); } }, 100);
+
+  $('#fqNo').onclick = closeSheet;
+  $('#fqGo').onclick = function () {
+    var v = parseFloat($('#fqN').value);
+    if (!(v > 0)) return toastErr('数を入れてください');
+    if (v < used - 0.0005) return toastErr('もう' + fmtQty(used, unit) + '食べています');
+    var b = $('#fqGo');
+    b.disabled = true; b.textContent = '直しています…';
+    call('resizeLot', { lotId: lotId, qty: v }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '直せませんでした');
+      closeSheet();
+      if (r.summary) S.summary = r.summary;
+      S.dayCache = {};
+      return refresh(true).then(function () {
+        toast(name + ' を ' + fmtQty(v, unit) + ' に直しました');
+      });
+    }).catch(function (e) {
+      var b2 = $('#fqGo');
+      if (b2) { b2.disabled = false; b2.textContent = 'この食数にする'; }
       toastErr((e && e.message) || '直せませんでした');
     });
   };
