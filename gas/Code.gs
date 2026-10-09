@@ -319,6 +319,7 @@ function dispatch_(action, p) {
     case 'finishPeriod':  return apiFinishPeriod_(p);
     case 'stopPeriod':    return apiStopPeriod_(p);
     case 'fixLot':        return apiFixLot_(p);
+    case 'resizeLot':     return apiResizeLot_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
     case 'ocrStatus':     return apiOcrStatus_(p);
@@ -1402,6 +1403,124 @@ function apiFixLot_(p) {
       summary: buildSummary_(d2s_(lot['日付']).slice(0, 7)),
     };
   } finally { lock.releaseLock(); }
+}
+
+
+/**
+ * 作り置きの食数をあとから直す。
+ * 「11食で登録したけど、分けてみたら10食だった」のようなときに使う。
+ *
+ * 合計金額はそのままで、1食あたりの単価だけが変わる。
+ * もう食べた分は食べた数のまま残し、残りの数を新しい食数に合わせる
+ * （11食で登録して2食食べていたら、10食に直すと残りは8食）。
+ * 食べた分の金額は新しい単価で引き直す。金額を直すときと同じ考え方。
+ *
+ * このロットを材料にして別の作り置きを作っていた場合は、
+ * その作り置きの合計金額も差額ぶん直し、そこから食べた分も引き直す。
+ */
+function apiResizeLot_(p) {
+  const lotId = String((p && p.lotId) || '');
+  const newQty = Math.round(num_(p && p.qty) * 1000) / 1000;
+  if (!lotId) return { ok: false, error: 'どの作り置きかが指定されていません' };
+  if (!(newQty > 0)) return { ok: false, error: '数を入れてください' };
+  if (getPeriods_()[lotId]) return { ok: false, error: '期間で割っている最中は数を直せません' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const shLots = sheet_('lots');
+    const shCons = sheet_('cons');
+    const lots = {};
+    readAll_('lots').forEach(function (l) { lots[String(l['ロットID'])] = l; });
+    const lot = lots[lotId];
+    if (!lot) return { ok: false, error: 'その作り置きが見つかりません' };
+
+    const unit = String(lot['単位'] || '');
+    if (unit === PREP_UNIT_LABEL) return { ok: false, error: '％で持っている作り置きは食数を直せません' };
+    const oldQty = num_(lot['内容量']);
+    if (!(oldQty > 0)) return { ok: false, error: '内容量が0のものは直せません' };
+
+    const remain = num_(lot['残量']);
+    const used = Math.max(0, Math.round((oldQty - remain) * 1000) / 1000);
+    if (newQty < used - 0.0005) {
+      return { ok: false, error: 'もう' + used + unit + '食べているので、' + used + unit + 'より少なくはできません' };
+    }
+    const newRemain = Math.max(0, Math.round((newQty - used) * 1000) / 1000);
+    const yen = num_(lot['金額']);
+    const perU = yen / newQty;
+
+    setCell_(shLots, lot._row, col_('lots', '内容量'), newQty, '0.############');
+    setCell_(shLots, lot._row, col_('lots', '円/単位'), perU, '0.############');
+    writeRemains_(shLots, [{ row: lot._row, remain: newRemain,
+                             status: newRemain > 0.0005 ? '在庫あり' : '使い切り' }]);
+    lot['内容量'] = newQty; lot['円/単位'] = perU; lot['残量'] = newRemain;
+    lot['状態'] = newRemain > 0.0005 ? '在庫あり' : '使い切り';
+
+    const ctx = { lots: lots, cons: readAll_('cons'), shLots: shLots, shCons: shCons,
+                  touched: [], chained: [] };
+    repriceLotCons_(lotId, perU, ctx, 0);
+
+    // 次に同じ作り置きを登録するときの初期値も、直した数に合わせる。
+    // ただしこれがその食材のいちばん新しい作り置きのときだけ（古いものを直しても初期値は動かさない）
+    const fid = String(lot['食材ID']);
+    let newest = null;
+    Object.keys(lots).forEach(function (k) {
+      const l = lots[k];
+      if (String(l['食材ID']) !== fid) return;
+      if (!newest || l._row > newest._row) newest = l;
+    });
+    if (newest === lot) {
+      const shF = sheet_('foods');
+      const fr = findRow_(shF, col_('foods', '食材ID'), fid);
+      if (fr > 0) setCell_(shF, fr, col_('foods', '前回の量'), newQty);
+    }
+
+    return {
+      ok: true,
+      lot: { id: lotId, name: String(lot['品名']), unit: unit,
+             before: oldQty, after: newQty, remain: newRemain, used: used,
+             yen: r2_(yen), perU: r2_(perU) },
+      cons: ctx.touched,
+      chained: ctx.chained,
+      summary: buildSummary_(d2s_(lot['日付']).slice(0, 7)),
+    };
+  } finally { lock.releaseLock(); }
+}
+
+/**
+ * ロットの単価が変わったときに、そのロットから出た消費の金額を引き直す。
+ * 「作り置きへ振替」で別の作り置きの材料になっていた分は、
+ * 振替先の作り置きの合計金額にも差額を反映し、さらにそこから食べた分も引き直す。
+ */
+function repriceLotCons_(lotId, perU, ctx, depth) {
+  const deltas = {};
+  ctx.cons.forEach(function (c) {
+    if (String(c['ロットID']) !== lotId) return;
+    const before = num_(c['金額']);
+    const after = r2_(num_(c['使用量']) * perU);
+    if (Math.abs(after - before) < 0.005) return;
+    setCell_(ctx.shCons, c._row, col_('cons', '金額'), after, '0.############');
+    c['金額'] = after;
+    ctx.touched.push({
+      id: String(c['消費ID']), date: d2s_(c['日付'] || String(c['日時']).slice(0, 10)),
+      kind: String(c['種別']), before: r2_(before), after: after,
+    });
+    const to = String(c['振替先ロットID'] || '');
+    if (String(c['種別']) === KIND.prep && to) deltas[to] = (deltas[to] || 0) + (after - before);
+  });
+  if (depth >= 5) return;   // 作り置きの材料が作り置き…が何段も続くことは実際にはない
+  Object.keys(deltas).forEach(function (to) {
+    const t = ctx.lots[to];
+    if (!t) return;
+    const q = num_(t['内容量']);
+    if (!(q > 0)) return;
+    const ny = r2_(num_(t['金額']) + deltas[to]);
+    setCell_(ctx.shLots, t._row, col_('lots', '金額'), ny, '0.############');
+    setCell_(ctx.shLots, t._row, col_('lots', '円/単位'), ny / q, '0.############');
+    t['金額'] = ny; t['円/単位'] = ny / q;
+    ctx.chained.push({ id: to, name: String(t['品名']), yen: ny });
+    repriceLotCons_(to, ny / q, ctx, depth + 1);
+  });
 }
 
 
