@@ -1700,9 +1700,12 @@ function apiReadReceipt_(p) {
   let code = 0, text = '', usedModel = '', tries = 0;
   const attempts = [];          // 1回ごとの結果。失敗の理由を後から追えるように残す
   const started = Date.now();
+  let best = null;              // いちばんましだった読み取り結果
 
   outer:
   for (let round = 0; round < OCR_ROUNDS; round++) {
+    // どこかのモデルが返事はくれた（中身が空だっただけ）なら、もう一周しても同じなので打ち切る
+    if (round > 0 && best) break;
     if (round > 0) Utilities.sleep(OCR_ROUND_WAIT);
     for (let mi = 0; mi < models.length; mi++) {
       tries++;
@@ -1733,45 +1736,62 @@ function apiReadReceipt_(p) {
         code = 0;
         text = JSON.stringify({ error: { message: String(err && err.message ? err.message : err) } });
       }
-      attempts.push({ model: usedModel, code: code, ms: Date.now() - t0, msg: code === 200 ? '' : ocrErrMsg_(text) });
-      if (code === 200) break outer;
+      let parsed = null;
+      if (code === 200) {
+        parsed = parseOcrResponse_(text);
+        if (parsed.receipt && parsed.receipt.items.length) {
+          attempts.push({ model: usedModel, code: code, ms: Date.now() - t0, msg: '' });
+          best = parsed;
+          break outer;
+        }
+        // 返事は来たのに品物が1つも取れなかった。モデルの気まぐれのことがあるので、別のモデルでも読ませてみる
+        attempts.push({ model: usedModel, code: code, ms: Date.now() - t0,
+                        msg: (parsed.receipt ? '品物0件' : parsed.error) + (parsed.sample ? ' 「' + parsed.sample.slice(0, 200) + '」' : '') });
+        if (!best || (parsed.receipt && !best.receipt)) best = parsed;
+        continue;
+      }
+      attempts.push({ model: usedModel, code: code, ms: Date.now() - t0, msg: ocrErrMsg_(text) });
       if (code !== 0 && !ocrShouldRetry_(code)) break outer;   // キー違いなどは投げ直しても同じ
     }
   }
 
   const logBase = { kb: Math.round(image.length * 3 / 4 / 1024), sec: Math.round((Date.now() - started) / 100) / 10, attempts: attempts };
 
-  if (code !== 200) {
+  if (!best) {
     const error = code === 0 ? '読み取り側から返事がありませんでした。少し時間をおいてからもう一度' : ocrHttpError_(code, text);
     ocrLog_(Object.assign({ ok: false, error: error }, logBase));
     return { ok: false, error: error, httpCode: code, tries: tries, attempts: attempts };
   }
 
+  if (!best.receipt) {
+    ocrLog_(Object.assign({ ok: false, error: best.error }, logBase));
+    return { ok: false, error: best.userError || best.error, tries: tries, attempts: attempts };
+  }
+
+  ocrLog_(Object.assign({ ok: true, items: best.receipt.items.length }, logBase));
+  return { ok: true, receipt: best.receipt, model: best.receipt.items.length ? usedModel : '', tries: tries };
+}
+
+/**
+ * 読み取り側の返事（HTTP 200 の本文）から、レシートの中身を取り出す。
+ * 取り出せたら { receipt }、だめなら { error, userError, sample }。
+ */
+function parseOcrResponse_(text) {
   let raw;
-  try { raw = JSON.parse(text); } catch (e) { return { ok: false, error: '読み取り結果を解釈できませんでした' }; }
+  try { raw = JSON.parse(text); }
+  catch (e) { return { error: '返事をJSONとして読めない', userError: '読み取り結果を解釈できませんでした', sample: String(text).slice(0, 300) }; }
 
   const jsonText = pickOcrText_(raw);
-  if (!jsonText) {
-    ocrLog_(Object.assign({ ok: false, error: '読み取り結果が空でした', sample: text.slice(0, 300) }, logBase));
-    return {
-      ok: false,
-      error: '読み取り結果が空でした',
-      shape: Object.keys(raw || {}).join(','),
-      status: String((raw && raw.status) || ''),
-      sample: text.slice(0, 1200),   // 何が返ってきたのか後から追えるように
-    };
-  }
+  if (!jsonText) return { error: '読み取り結果が空', userError: '読み取り結果が空でした', sample: String(text).slice(0, 300) };
 
   let out;
   try { out = JSON.parse(jsonText); }
   catch (e) {
-    ocrLog_(Object.assign({ ok: false, error: '中身がJSONとして読めない' }, logBase));
-    return { ok: false, error: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります' };
+    return { error: '中身がJSONとして読めない', userError: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります',
+             sample: jsonText.slice(0, 300) };
   }
-
   const receipt = cleanReceipt_(out);
-  ocrLog_(Object.assign({ ok: true, items: receipt.items.length }, logBase));
-  return { ok: true, receipt: receipt, model: usedModel, tries: tries };
+  return { receipt: receipt, sample: receipt.items.length ? '' : jsonText.slice(0, 300) };
 }
 
 /** エラー応答から短い理由だけ取り出す */
