@@ -292,6 +292,31 @@ section('レシート読取：混んでいたら投げ直す');
   }
 
   {
+    // 返事は来たのに品物が0件（10/10 イオンのレシートで実際に起きた）。別のモデルで読み直す
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    const empty = JSON.stringify({ output_text: JSON.stringify({ date: '2026-10-09', items: [] }) });
+    e.net.reply = (url, params) => {
+      const body = JSON.parse(params.payload);
+      return { code: 200, body: body.model === 'gemini-3.6-flash' ? empty : good };
+    };
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('0件なら別のモデルで読み直して取れる', r.ok === true && r.receipt.items.length === 1, r);
+    ok('読み直した先のモデルが返る', r.model === 'gemini-3.8-flash', r.model);
+    ok('ログに0件だったことが残る', /品物0件/.test(String(e.rows('読取ログ')[0]['詳細'])), e.rows('読取ログ')[0]);
+  }
+  {
+    // どのモデルも0件：本当に何も写っていない。二周目はしない
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    const empty = JSON.stringify({ output_text: JSON.stringify({ date: '', items: [] }) });
+    e.net.reply = () => ({ code: 200, body: empty });
+    e.net.fetches.length = 0; e.net.sleeps.length = 0;
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('全部0件なら空の結果を返す', r.ok === true && r.receipt.items.length === 0, r);
+    ok('3モデル1周で打ち切る', e.net.fetches.length === 3 && e.net.sleeps.length === 0, [e.net.fetches.length, e.net.sleeps]);
+  }
+  {
     // 通信が時間切れで例外になっても、止まらずに次のモデルへ回す
     const e = newEnv();
     e.call('setOcrKey', { key: 'x'.repeat(30) });
