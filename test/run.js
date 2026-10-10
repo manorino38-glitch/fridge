@@ -292,6 +292,31 @@ section('レシート読取：混んでいたら投げ直す');
   }
 
   {
+    // 通信が時間切れで例外になっても、止まらずに次のモデルへ回す
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = (url, params) => {
+      const body = JSON.parse(params.payload);
+      if (body.model === 'gemini-3.6-flash') throw new Error('Timeout: ' + url);
+      return { code: 200, body: good };
+    };
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('時間切れでも次のモデルで読める', r.ok === true, r.error);
+    const log = e.rows('読取ログ');
+    ok('読取ログに1行残る', log.length === 1, log);
+    ok('ログに時間切れの理由が残る', log[0] && /Timeout/.test(String(log[0]['詳細'])) && log[0]['結果'] === 'OK', log[0]);
+  }
+  {
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = () => { throw new Error('Timeout'); };
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('全部時間切れなら諦めて理由を返す', r.ok === false && /返事/.test(r.error), r);
+    ok('試した回数と理由が返る', r.attempts && r.attempts.length === 6, r.attempts);
+    ok('失敗もログに残る', e.rows('読取ログ')[0]['結果'] === 'NG');
+  }
+
+  {
     const e = newEnv();
     e.call('setOcrKey', { key: 'x'.repeat(30) });
     e.net.reply = () => ({ code: 400, body: JSON.stringify({ error: { message: 'API key not valid' } }) });
