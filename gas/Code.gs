@@ -1698,6 +1698,8 @@ function apiReadReceipt_(p) {
   // 一周して全部塞がっていたら少し待ってもう一周。それでも駄目なら諦める。
   const models = [OCR_MODEL].concat(OCR_MODEL_RING);
   let code = 0, text = '', usedModel = '', tries = 0;
+  const attempts = [];          // 1回ごとの結果。失敗の理由を後から追えるように残す
+  const started = Date.now();
 
   outer:
   for (let round = 0; round < OCR_ROUNDS; round++) {
@@ -1715,23 +1717,34 @@ function apiReadReceipt_(p) {
         response_format: { type: 'text', mime_type: 'application/json', schema: OCR_SCHEMA },
       };
 
-      const res = UrlFetchApp.fetch(OCR_ENDPOINT, {
-        method: 'post',
-        contentType: 'application/json',
-        headers: { 'x-goog-api-key': key },
-        payload: JSON.stringify(body),
-        muteHttpExceptions: true,
-      });
-
-      code = res.getResponseCode();
-      text = res.getContentText();
+      const t0 = Date.now();
+      try {
+        const res = UrlFetchApp.fetch(OCR_ENDPOINT, {
+          method: 'post',
+          contentType: 'application/json',
+          headers: { 'x-goog-api-key': key },
+          payload: JSON.stringify(body),
+          muteHttpExceptions: true,
+        });
+        code = res.getResponseCode();
+        text = res.getContentText();
+      } catch (err) {
+        // 通信そのものが切れた・時間切れになった。混雑と同じ扱いで次のモデルへ回す
+        code = 0;
+        text = JSON.stringify({ error: { message: String(err && err.message ? err.message : err) } });
+      }
+      attempts.push({ model: usedModel, code: code, ms: Date.now() - t0, msg: code === 200 ? '' : ocrErrMsg_(text) });
       if (code === 200) break outer;
-      if (!ocrShouldRetry_(code)) break outer;   // キー違いなどは投げ直しても同じ
+      if (code !== 0 && !ocrShouldRetry_(code)) break outer;   // キー違いなどは投げ直しても同じ
     }
   }
 
+  const logBase = { kb: Math.round(image.length * 3 / 4 / 1024), sec: Math.round((Date.now() - started) / 100) / 10, attempts: attempts };
+
   if (code !== 200) {
-    return { ok: false, error: ocrHttpError_(code, text), httpCode: code, tries: tries };
+    const error = code === 0 ? '読み取り側から返事がありませんでした。少し時間をおいてからもう一度' : ocrHttpError_(code, text);
+    ocrLog_(Object.assign({ ok: false, error: error }, logBase));
+    return { ok: false, error: error, httpCode: code, tries: tries, attempts: attempts };
   }
 
   let raw;
@@ -1739,6 +1752,7 @@ function apiReadReceipt_(p) {
 
   const jsonText = pickOcrText_(raw);
   if (!jsonText) {
+    ocrLog_(Object.assign({ ok: false, error: '読み取り結果が空でした', sample: text.slice(0, 300) }, logBase));
     return {
       ok: false,
       error: '読み取り結果が空でした',
@@ -1750,9 +1764,46 @@ function apiReadReceipt_(p) {
 
   let out;
   try { out = JSON.parse(jsonText); }
-  catch (e) { return { ok: false, error: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります' }; }
+  catch (e) {
+    ocrLog_(Object.assign({ ok: false, error: '中身がJSONとして読めない' }, logBase));
+    return { ok: false, error: 'レシートの内容を読み取れませんでした。写真を撮り直すと通ることがあります' };
+  }
 
-  return { ok: true, receipt: cleanReceipt_(out), model: usedModel, tries: tries };
+  const receipt = cleanReceipt_(out);
+  ocrLog_(Object.assign({ ok: true, items: receipt.items.length }, logBase));
+  return { ok: true, receipt: receipt, model: usedModel, tries: tries };
+}
+
+/** エラー応答から短い理由だけ取り出す */
+function ocrErrMsg_(text) {
+  try {
+    const j = JSON.parse(text);
+    const e = j && j.error;
+    if (e) return String(e.message || e.status || '').slice(0, 160);
+  } catch (err) {}
+  return String(text || '').slice(0, 160);
+}
+
+/**
+ * 読み取り1回ぶんの結果を「読取ログ」シートに1行残す。
+ * 読めなかったときに、どのモデルが何秒で何を返したのかを後から確かめるため。
+ * 画像そのものは残さない。ここで失敗しても読み取りの結果には影響させない。
+ */
+const OCR_LOG_SHEET = '読取ログ';
+function ocrLog_(o) {
+  try {
+    const ss = ss_();
+    let sh = ss.getSheetByName(OCR_LOG_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(OCR_LOG_SHEET);
+      sh.appendRow(['日時', '結果', '試行', '画像KB', '秒', '理由', '詳細']);
+    }
+    const tries = (o.attempts || []).map(function (a) {
+      return a.model.replace('gemini-', '') + ':' + a.code + '(' + Math.round(a.ms / 100) / 10 + '秒)' + (a.msg ? ' ' + a.msg : '');
+    }).join(' / ');
+    sh.appendRow([nowStr_(), o.ok ? 'OK' : 'NG', (o.attempts || []).length, o.kb, o.sec,
+                  o.ok ? (o.items + '品') : String(o.error || ''), tries + (o.sample ? ' | ' + o.sample : '')]);
+  } catch (err) {}
 }
 
 /**
