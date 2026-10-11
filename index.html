@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-11a';
+var APP_VERSION = '2026-10-11b';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1132,7 +1132,8 @@ function askDelete(id) {
     note = 'この材料を作り置きに回した記録です。消すと材料が在庫に戻り、' +
            '作り置きの金額もそのぶん減ります。その作り置きをもう食べていても、' +
            '食べた分の金額をこの材料ぬきで引き直します。' +
-           '材料がこれだけのときは作り置きごと消えるので、もう食べていると消せません。';
+           '材料がこれだけのときは作り置きごと消えるので、もう食べていると消せません。' +
+           '量だけ違っていたなら「入れた量を直す」を使ってください。';
   } else if (x.from === '在庫外') {
     note = 'この支出を消します。在庫には影響しません。';
   } else if (x.counted) {
@@ -1146,11 +1147,14 @@ function askDelete(id) {
     '<div class="delbox"><div class="t">' + esc(x.name) + '</div>' +
       '<div class="m">' + esc(line) + '</div></div>' +
     '<p class="tiny muted" style="margin:0 0 14px;line-height:1.8">' + esc(note) + '</p>' +
+    (x.kind === '作り置きへ振替'
+      ? '<button class="btn" id="delFix">入れた量を直す</button><div style="height:9px"></div>' : '') +
     '<button class="btn" id="delGo" style="background:var(--danger)">消す</button>' +
     '<div style="height:9px"></div>' +
     '<button class="btn quiet" id="delNo">やめる</button>'
   );
   $('#delNo').onclick = closeSheet;
+  if ($('#delFix')) $('#delFix').onclick = function () { showFixPart(x); };
   $('#delGo').onclick = function () {
     var b = $('#delGo');
     b.disabled = true; b.textContent = '消しています…';
@@ -2625,6 +2629,62 @@ function showFixQty(lotId) {
     }).catch(function (e) {
       var b2 = $('#fqGo');
       if (b2) { b2.disabled = false; b2.textContent = 'この食数にする'; }
+      toastErr((e && e.message) || '直せませんでした');
+    });
+  };
+}
+
+/* ---- 作り置きに入れた材料の量を直す ---------------------------------------
+ * 「実際は600g入れたのに、別の数字で記録していた」ときに使う。
+ * 材料の在庫・作り置きの金額・もう食べた分の金額が、まとめて合う。
+ * ------------------------------------------------------------------------*/
+function showFixPart(x) {
+  var unit = x.unit || '';
+  var lot = lotById(x.lotId);
+  var room = lot ? Math.round((lot.remain + x.qty) * 1000) / 1000 : null;   // 足せる上限
+  openSheet(
+    '<h3>入れた量を直す</h3>' +
+    '<div class="delbox"><div class="t">' + esc(x.name) + '</div>' +
+      '<div class="m">いまの記録　' + esc(fmtQty(x.qty, unit)) + '　' + yen(x.yen) + '</div></div>' +
+    '<label class="fld"><span>ほんとうに入れた量</span>' +
+      '<div class="inw"><input id="fpN" inputmode="decimal" value="' + x.qty + '"><i>' + esc(unit) + '</i></div></label>' +
+    '<div class="perg" id="fpOut">&nbsp;</div>' +
+    '<p class="tiny muted" style="margin:2px 0 14px;line-height:1.8">' +
+      '材料の在庫が差の分だけ増減し、作り置きの金額も合わせて直ります。' +
+      'もう食べた分の金額も新しい値段で引き直します。</p>' +
+    '<button class="btn" id="fpGo">この量にする</button>' +
+    '<div style="height:9px"></div>' +
+    '<button class="btn quiet" id="fpNo">やめる</button>'
+  );
+  var paint = function () {
+    var v = parseFloat($('#fpN').value), el = $('#fpOut');
+    if (!(v > 0)) { el.textContent = '量を入れてください'; return; }
+    if (room != null && v > room + 0.0005) { el.textContent = '在庫が足りません（最大 ' + fmtQty(room, unit) + '）'; return; }
+    var d = Math.round((v - x.qty) * 1000) / 1000;
+    el.textContent = d === 0 ? '変わりません'
+      : (d > 0 ? '在庫から さらに ' + fmtQty(d, unit) + ' 減ります' : '在庫に ' + fmtQty(-d, unit) + ' 戻ります') +
+        (lot ? '（残り ' + fmtQty(Math.round((lot.remain - d) * 1000) / 1000, unit) + '）' : '');
+  };
+  $('#fpN').oninput = paint; paint();
+  setTimeout(function () { var i = $('#fpN'); if (i) { i.focus(); i.select(); } }, 100);
+  $('#fpNo').onclick = closeSheet;
+  $('#fpGo').onclick = function () {
+    var v = parseFloat($('#fpN').value);
+    if (!(v > 0)) return toastErr('量を入れてください');
+    var b = $('#fpGo');
+    b.disabled = true; b.textContent = '直しています…';
+    call('fixPrepPart', { id: x.id, qty: v }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '直せませんでした');
+      closeSheet();
+      if (r.summary) S.summary = r.summary;
+      S.dayCache = {};
+      return refresh(true).then(function () {
+        showDay(dayKey());
+        toast(x.name + ' を ' + fmtQty(v, unit) + ' に直しました（' + r.prep.name + ' ' + yen(r.prep.after) + '）');
+      });
+    }).catch(function (e) {
+      var b2 = $('#fpGo');
+      if (b2) { b2.disabled = false; b2.textContent = 'この量にする'; }
       toastErr((e && e.message) || '直せませんでした');
     });
   };
