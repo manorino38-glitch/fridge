@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-11b';
+var APP_VERSION = '2026-10-11c';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1056,9 +1056,15 @@ function askenLines(d, meal) {
 
     // 作り置きは、食べた分に当たる材料と量に分けて書く（料理名より分量が正確になる）
     if (x.parts && x.parts.length) {
-      x.parts.forEach(function (p) {
+      askenCook(x.parts, add).forEach(function (p) {
         add(askenName(p.name, p.unit), p.unit === '%' ? 0 : (Number(p.qty) || 0), p.unit === '%' ? '' : (p.unit || ''));
       });
+      return;
+    }
+
+    // お米をそのまま記録した日も、炊いたごはんの重さにして渡す
+    if (x.unit === 'g' && askenGrain(x.name)) {
+      askenCook([{ name: x.name, qty: x.qty, unit: 'g' }], add);
       return;
     }
 
@@ -1071,6 +1077,42 @@ function askenLines(d, meal) {
   return rows.map(function (r) {
     return r.qty > 0 ? r.name + ' ' + fmtQty(askenRound(r.qty, r.unit), r.unit) : r.name;
   });
+}
+
+/* ---- お米は炊いたごはんの重さで渡す ----------------------------------------
+ * あすけんのAIは、お米を「ご飯（白ごはん100g）」のような炊いたごはんの品目で記録する。
+ * 「白米（炊く前）42g」と渡すと、その置き換えの途中で量がずれた（0.6杯・94kcalになった）。
+ * そこで、作り置きの材料にお米・雑穀があれば、炊く前の重さを合計して
+ * 炊いたあとの重さに直し、ごはん1行にまとめて渡す。
+ *   雑穀が入っていれば「雑穀ご飯 小盛り」（あすけんの「雑穀ご飯 小盛り 150g」に合わせる）
+ *   お米だけなら「ご飯」
+ * 品目は作り置きの名前ではなく材料から決めるので、作り置きの名前の書き方が毎回違っても同じ行になる。
+ * 炊くと重さはおよそ2.2倍（精白米100gが342kcal、ごはん100gが156kcalで、カロリーの比も約2.2）。 */
+var ASKEN_COOK = 2.2;
+var ASKEN_RICE = /(白米|精白米|胚芽米|無洗米)(?!粉|酢|油|酒|麹|ぬか|茶)|^お?米($|[\s(（0-9０-９])/;
+var ASKEN_GENMAI = /玄米(?!粉|酢|油|酒|麹|茶|フレーク)/;
+var ASKEN_ZAKKOKU = /(押麦|押し麦|もち麦|雑穀)(?!粉|酢|油|酒|麹|ぬか|茶)|ごはんの素|ご飯の素/;
+
+function askenGrain(name) {
+  name = String(name || '');
+  return ASKEN_RICE.test(name) || ASKEN_GENMAI.test(name) || ASKEN_ZAKKOKU.test(name);
+}
+
+/** お米・雑穀の材料をごはん1行にまとめて add し、残りの材料を返す */
+function askenCook(parts, add) {
+  var raw = 0, mix = false, white = false, rest = [];
+  parts.forEach(function (p) {
+    if (p.unit === 'g' && askenGrain(p.name)) {
+      raw += Number(p.qty) || 0;
+      if (ASKEN_ZAKKOKU.test(p.name)) mix = true;
+      else if (!ASKEN_GENMAI.test(p.name)) white = true;
+    } else rest.push(p);
+  });
+  if (raw > 0) {
+    var name = mix ? '雑穀ご飯 小盛り' : (white ? 'ご飯' : '玄米ご飯');
+    add(name, raw * ASKEN_COOK, 'g');
+  }
+  return rest;
 }
 
 /* 作り置きの材料は「買ったときの状態」の重さで入っている。
