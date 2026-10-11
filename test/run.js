@@ -678,6 +678,37 @@ section('作り置きに入れ間違えた材料を、食べたあとでも外�
   ok('食べた1食の金額も引き直される', near(Number(eaten['金額']), (105 + 12.96) / 4), eaten['金額']);
 }
 
+section('作り置きに入れた材料の量を直す');
+{
+  const e = newEnv('2026-10-11T03:00:00Z');
+  const mk = (n, u, q, y) => { const f = e.call('addFood', { name: n, category: '常温', unit: u, tracked: true });
+    return e.call('addLots', { items: [{ foodId: f.food.id, qty: q, yen: y, unit: u, date: '2026-09-20' }] }).lots[0]; };
+  const rice = mk('お米', 'g', 1000, 498), mugi = mk('雑穀', 'g', 500, 400);
+  const pr = e.call('record', { meal: '昼', datetime: '2026-10-09 12:41:00', makePrep: true, prepName: '雑穀ごはん', prepServings: 10,
+                                entries: [{ lotId: rice.id, qty: 418.5 }, { lotId: mugi.id, qty: 100 }] });
+  e.call('record', { meal: '夕', datetime: '2026-10-09 19:00:00', entries: [{ lotId: pr.prepLot.id, qty: 2 }] });
+  const riceRow = e.rows('消費').filter((c) => String(c['品名']) === 'お米')[0];
+  const before = pr.prepLot.yen;
+  ok('在庫より多くは足せない', e.call('fixPrepPart', { id: String(riceRow['消費ID']), qty: 1500 }).ok === false);
+  const r = e.call('fixPrepPart', { id: String(riceRow['消費ID']), qty: 600 });
+  ok('食べたあとでも量を直せる', r.ok === true, r.error);
+  const b = e.call('bootstrap', {});
+  ok('お米の残りが600g引いた分になる', near(b.lots.filter((l) => l.id === rice.id)[0].remain, 400), b.lots.filter((l) => l.id === rice.id)[0].remain);
+  const p2 = b.lots.filter((l) => l.id === pr.prepLot.id)[0];
+  ok('作り置きの金額が増えた分だけ上がる', near(p2.yen, before + 181.5 * 0.498), p2.yen);
+  ok('食数はそのまま', p2.qty === 10 && near(p2.remain, 8), p2);
+  const eaten = e.rows('消費').filter((c) => String(c['ロットID']) === pr.prepLot.id)[0];
+  ok('食べた2食の金額も引き直される', near(Number(eaten['金額']), p2.yen / 10 * 2), eaten['金額']);
+  const row2 = e.rows('消費').filter((c) => String(c['消費ID']) === String(riceRow['消費ID']))[0];
+  ok('材料の記録は600g・298.8円', near(Number(row2['使用量']), 600) && near(Number(row2['金額']), 298.8), row2);
+  const back = e.call('fixPrepPart', { id: String(riceRow['消費ID']), qty: 500 });
+  ok('減らすと在庫に戻る', back.ok && near(back.part.srcRemain, 500), back);
+  const day = e.call('day', { date: '2026-10-09' }).day;
+  const it = day.items.filter((x) => x.kind === '作り置きへ振替' && x.name === 'お米')[0];
+  ok('明細に材料のロットIDが付く', it && it.lotId === rice.id, it);
+  ok('振替以外は断る', e.call('fixPrepPart', { id: String(eaten['消費ID']), qty: 3 }).ok === false);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
