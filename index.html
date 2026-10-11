@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-09a';
+var APP_VERSION = '2026-10-10a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1041,24 +1041,54 @@ function askenLines(d, meal) {
   if (!d || !d.items) return [];
   var rows = [], byKey = {};
 
+  var add = function (name, qty, unit) {
+    // 同じものを別のロットから取った日は1行にまとめる（玉ねぎ 100g + 4g → 104g）。
+    // 作り置きの材料と、そのまま食べた同じ食材もここで合わさる
+    var key = name + '\u0000' + unit;
+    if (byKey[key]) { byKey[key].qty += qty; return; }
+    byKey[key] = { name: name, unit: unit, qty: qty };
+    rows.push(byKey[key]);
+  };
+
   d.items.forEach(function (x) {
     if (!x.counted) return;
     if (meal !== '*' && (x.meal || '') !== meal) return;
 
-    // 作り置きの単位は「全体の何%か」。あすけんに渡しても意味がないので量は書かない
+    // 作り置きは、食べた分に当たる材料と量に分けて書く（料理名より分量が正確になる）
+    if (x.parts && x.parts.length) {
+      x.parts.forEach(function (p) {
+        add(askenName(p.name, p.unit), p.unit === '%' ? 0 : (Number(p.qty) || 0), p.unit === '%' ? '' : (p.unit || ''));
+      });
+      return;
+    }
+
+    // 材料の記録が無い作り置きの単位は「全体の何%か」。あすけんに渡しても意味がないので量は書かない
     var unit = (x.unit === '%') ? '' : (x.unit || '');
     var qty = (x.unit === '%') ? 0 : (Number(x.qty) || 0);
-
-    // 同じものを別のロットから取った日は1行にまとめる（玉ねぎ 100g + 4g → 104g）
-    var key = x.name + '\u0000' + unit;
-    if (byKey[key]) { byKey[key].qty += qty; return; }
-    byKey[key] = { name: x.name, unit: unit, qty: qty };
-    rows.push(byKey[key]);
+    add(x.name, qty, unit);
   });
 
   return rows.map(function (r) {
-    return r.qty > 0 ? r.name + ' ' + fmtQty(r.qty, r.unit) : r.name;
+    return r.qty > 0 ? r.name + ' ' + fmtQty(askenRound(r.qty, r.unit), r.unit) : r.name;
   });
+}
+
+/* 作り置きの材料は「買ったときの状態」の重さで入っている。
+ * 米や麺のように炊く・ゆでる前後で重さが大きく変わるものは、
+ * あすけん側がごはん・ゆで麺の重さと取り違えないよう「（炊く前）」などを添える */
+var ASKEN_DRY = [
+  [/(白米|精白米|胚芽米|玄米|無洗米|押麦|押し麦|もち麦|雑穀)(?!粉|酢|油|酒|麹|ぬか|茶)|^お?米($|[\s(（0-9０-９])|ごはんの素|ご飯の素/, '（炊く前）'],
+  [/パスタ|スパゲ|マカロニ|そうめん|素麺|乾麺|十割そば|そば\(|うどん\(|春雨|ビーフン/, '（ゆでる前）'],
+  [/オートミール|ロールドオーツ/, '（乾燥）'],
+];
+function askenName(name, unit) {
+  if (unit !== 'g') return name;
+  for (var i = 0; i < ASKEN_DRY.length; i++) if (ASKEN_DRY[i][0].test(name)) return name + ASKEN_DRY[i][1];
+  return name;
+}
+/** 材料を割ると端数が出るので、g・mlは整数、それ以外は小数1桁にそろえる */
+function askenRound(q, unit) {
+  return (unit === 'g' || unit === 'ml') ? Math.max(1, Math.round(q)) : Math.round(q * 10) / 10;
 }
 
 function askenText(meal) {
