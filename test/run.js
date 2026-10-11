@@ -632,6 +632,32 @@ section('作り置きの食数を直す');
   ok('ロットIDが無ければ断る', e.call('resizeLot', { qty: 3 }).ok === false);
 }
 
+section('あすけん用：作り置きを材料に分ける');
+{
+  const e = newEnv('2026-10-10T03:00:00Z');
+  const fr = e.call('addFood', { name: '白米', category: '常温', unit: 'g', tracked: true });
+  const fm = e.call('addFood', { name: '舞茸', category: '野菜室', unit: 'g', tracked: true });
+  const fs = e.call('addFood', { name: 'さば', category: 'チルド', unit: 'g', tracked: true });
+  const lr = e.call('addLots', { items: [{ foodId: fr.food.id, qty: 5000, yen: 2490, unit: 'g', date: '2026-10-01' }] }).lots[0];
+  const lm = e.call('addLots', { items: [{ foodId: fm.food.id, qty: 100, yen: 98, unit: 'g', date: '2026-10-01' }] }).lots[0];
+  const ls = e.call('addLots', { items: [{ foodId: fs.food.id, qty: 200, yen: 300, unit: 'g', date: '2026-10-01' }] }).lots[0];
+  // ごはん（白米300g → 6食）を作り、そのごはん2食＋舞茸＋さばで おにぎり4個
+  const rice = e.call('record', { meal: '昼', datetime: '2026-10-09 10:00:00', makePrep: true, prepName: 'ごはん', prepServings: 6,
+                                  entries: [{ lotId: lr.id, qty: 300 }] }).prepLot;
+  const oni = e.call('record', { meal: '昼', datetime: '2026-10-09 11:00:00', makePrep: true, prepName: 'おにぎり', prepServings: 4,
+                                 entries: [{ lotId: rice.id, qty: 2 }, { lotId: lm.id, qty: 80 }, { lotId: ls.id, qty: 120 }] }).prepLot;
+  e.call('record', { meal: '昼', datetime: '2026-10-10 12:00:00', entries: [{ lotId: oni.id, qty: 1 }, { lotId: ls.id, qty: 10 }] });
+  const day = e.call('day', { date: '2026-10-10' }).day;
+  const it = day.items.filter((x) => x.name === 'おにぎり')[0];
+  ok('作り置きを食べた行に材料が付く', it && Array.isArray(it.parts), it);
+  const get = (n) => (it.parts.filter((p) => p.name === n)[0] || {}).qty;
+  ok('ごはんは白米までたどる（300g÷6食×2食÷4個＝25g）', near(get('白米'), 25), it.parts);
+  ok('舞茸は80g÷4個＝20g', near(get('舞茸'), 20));
+  ok('さばは120g÷4個＝30g', near(get('さば'), 30));
+  const plain = day.items.filter((x) => x.name === 'さば')[0];
+  ok('そのまま食べた食材には材料が付かない', plain && !plain.parts, plain);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
