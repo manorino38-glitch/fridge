@@ -707,9 +707,9 @@ function apiAddExpense_(p) {
  * 消費なら、その分の量をロットに戻す（食べていないことにする）。
  * 在庫外支出なら、その行を消すだけ。
  * 作り置きへの振替は、消すと作り置き側のつじつまが合わなくなるので、
- *   ・その作り置きをもう食べていたら断る（先にそちらを消してもらう）
- *   ・材料がそれ1つだけなら、作り置きごと消す
- *   ・他にも材料があるなら、その材料ぶんだけ作り置きの金額から引く
+ *   ・材料がそれ1つだけなら、作り置きごと消す（もう食べていたら断る。先にそちらを消してもらう）
+ *   ・他にも材料があるなら、その材料ぶんだけ作り置きの金額から引く。
+ *     もう食べていても消せて、食べた分の金額も引き直す
  * ロック持ちの関数を呼ぶので、ここでは自分でロックを取らない。
  */
 function apiDeleteRecord_(p) {
@@ -744,16 +744,19 @@ function apiDeleteRecord_(p) {
     return r;
   }
 
+  const others = all.filter(function (x) {
+    return String(x['振替先ロットID']) === prepId && String(x['消費ID']) !== id;
+  });
+
+  // 材料がこれだけなら作り置きごと消すことになるので、もう食べていたら断る。
+  // 他にも材料があるなら、もう食べていても消せる。作り置きの金額をこの材料ぶん減らし、
+  // 食べた分の金額も新しい単価で引き直す（材料を入れ間違えたときの直し方）
   const eaten = all.filter(function (x) { return String(x['ロットID']) === prepId; });
-  if (eaten.length) {
+  if (eaten.length && !others.length) {
     const prep = readAll_('lots').filter(function (l) { return String(l['ロットID']) === prepId; })[0];
     return { ok: false,
       error: '「' + (prep ? String(prep['品名']) : '作り置き') + '」はもう食べた記録があります。先にそちらを消してください' };
   }
-
-  const others = all.filter(function (x) {
-    return String(x['振替先ロットID']) === prepId && String(x['消費ID']) !== id;
-  });
 
   const r = apiUndo_({ consIds: [id] });
   if (!r.ok) return r;
