@@ -1290,15 +1290,17 @@ function buildDay_(date) {
   let total = 0;
 
   const dayNameById = foodNameMap_();
+  const allCons = readAll_('cons');
+  let prepParts = null;   // 作り置きを食べた日だけ、材料の表を組み立てる
 
-  readAll_('cons').forEach(function (c) {
+  allCons.forEach(function (c) {
     if (d2s_(c['日付'] || String(c['日時']).slice(0, 10)) !== d0) return;
     const kind = String(c['種別']);
     const yen = num_(c['金額']);
     const counted = NOT_COUNTED.indexOf(kind) < 0;
     const meal = String(c['食事区分'] || '');
     if (counted) { total += yen; meals[meal in meals ? meal : ''] += yen; }
-    items.push({
+    const item = {
       time: String(c['日時']).slice(11, 16),
       name: dayNameById[String(c['食材ID'])] || String(c['品名']),
       qty: num_(c['使用量']),
@@ -1309,7 +1311,14 @@ function buildDay_(date) {
       counted: counted,
       from: '在庫',
       id: String(c['消費ID']),
-    });
+    };
+    // 作り置きを食べた記録には、食べた分に当たる材料の量を付けておく（あすけんへのコピー用）
+    if (counted) {
+      if (!prepParts) prepParts = prepPartsIndex_(allCons, dayNameById);
+      const parts = prepPartsFor_(prepParts, String(c['ロットID']), num_(c['使用量']));
+      if (parts) item.parts = parts;
+    }
+    items.push(item);
   });
 
   readAll_('out').forEach(function (o) {
@@ -1340,6 +1349,52 @@ function buildDay_(date) {
              '間食': r2_(meals['間食']), '未分類': r2_(meals['']) },
     items: items,
   };
+}
+
+/**
+ * 作り置きの材料表。作り置きロットごとに「何をどれだけ入れたか」を引けるようにする。
+ * 材料は「作り置きへ振替」の消費行に、振替先ロットIDつきで残っている。
+ */
+function prepPartsIndex_(allCons, nameById) {
+  const lots = {};
+  readAll_('lots').forEach(function (l) { lots[String(l['ロットID'])] = l; });
+  const parts = {};
+  allCons.forEach(function (c) {
+    if (String(c['種別']) !== KIND.prep) return;
+    const to = String(c['振替先ロットID'] || '');
+    if (!to) return;
+    (parts[to] = parts[to] || []).push({
+      lotId: String(c['ロットID']),
+      name: nameById[String(c['食材ID'])] || String(c['品名']),
+      qty: num_(c['使用量']),
+      unit: String(c['単位'] || ''),
+    });
+  });
+  return { lots: lots, parts: parts };
+}
+
+/**
+ * 作り置きロットから used だけ食べたとき、材料ごとに何をどれだけ食べたことになるか。
+ * 作り置きの材料がさらに作り置き（ごはん → おにぎり など）なら、その材料までたどる。
+ * 作り置きでないロット・材料の記録が無いロットは null。
+ */
+function prepPartsFor_(idx, lotId, used) {
+  const lot = idx.lots[lotId];
+  if (!lot || String(lot['由来']) !== '作り置き' || !idx.parts[lotId]) return null;
+  const out = [];
+  (function walk(id, frac, depth) {
+    idx.parts[id].forEach(function (p) {
+      const q = p.qty * frac;
+      const sub = idx.lots[p.lotId];
+      const subQty = sub ? num_(sub['内容量']) : 0;
+      if (depth < 4 && sub && String(sub['由来']) === '作り置き' && idx.parts[p.lotId] && subQty > 0) {
+        walk(p.lotId, q / subQty, depth + 1);
+      } else {
+        out.push({ name: p.name, qty: Math.round(q * 10) / 10, unit: p.unit });
+      }
+    });
+  })(lotId, used / (num_(lot['内容量']) || 1), 0);
+  return out.length ? out : null;
 }
 
 /** 当月なら今日まで、過去月ならその月の日数 */
