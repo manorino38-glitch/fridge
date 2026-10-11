@@ -320,6 +320,7 @@ function dispatch_(action, p) {
     case 'stopPeriod':    return apiStopPeriod_(p);
     case 'fixLot':        return apiFixLot_(p);
     case 'resizeLot':     return apiResizeLot_(p);
+    case 'fixPrepPart':   return apiFixPrepPart_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
     case 'ocrStatus':     return apiOcrStatus_(p);
@@ -780,6 +781,87 @@ function apiDeleteRecord_(p) {
   const day = d2s_(c['日付'] || String(c['日時']).slice(0, 10));
   return { ok: true, removed: removed,
            summary: buildSummary_(day.slice(0, 7)), day: buildDay_(today_()) };
+}
+
+
+/**
+ * 作り置きに入れた材料の量をあとから直す。
+ * 「実際は600g入れたのに、別の数字で記録していた」のようなときに使う。
+ *
+ * 材料の記録（作り置きへ振替）の量と金額を書き換え、
+ * 増えた分は材料の在庫から引き（減った分は戻し）、
+ * 作り置きの合計金額を差額ぶん直して、もう食べた分の金額も引き直す。
+ */
+function apiFixPrepPart_(p) {
+  const id = String((p && p.id) || '');
+  const newQty = Math.round(num_(p && p.qty) * 1000) / 1000;
+  if (!id) return { ok: false, error: 'どの記録かが指定されていません' };
+  if (!(newQty > 0)) return { ok: false, error: '量を入れてください' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const shLots = sheet_('lots');
+    const shCons = sheet_('cons');
+    const lots = {};
+    readAll_('lots').forEach(function (l) { lots[String(l['ロットID'])] = l; });
+    const cons = readAll_('cons');
+    const c = cons.filter(function (x) { return String(x['消費ID']) === id; })[0];
+    if (!c) return { ok: false, error: 'その記録が見つかりません' };
+    const prepId = String(c['振替先ロットID'] || '');
+    if (String(c['種別']) !== KIND.prep || !prepId) {
+      return { ok: false, error: '作り置きに入れた材料の記録ではありません' };
+    }
+    if (getPeriods_()[prepId]) return { ok: false, error: '期間で割っている最中は直せません' };
+
+    const src = lots[String(c['ロットID'])];
+    const prep = lots[prepId];
+    if (!src) return { ok: false, error: '材料の仕入が見つかりません' };
+    if (!prep) return { ok: false, error: '作り置きが見つかりません' };
+
+    const oldQty = num_(c['使用量']);
+    const delta = Math.round((newQty - oldQty) * 1000) / 1000;
+    const unit = String(c['単位'] || src['単位'] || '');
+    const srcRemain = num_(src['残量']);
+    if (delta > srcRemain + 0.0005) {
+      return { ok: false, error: '「' + String(src['品名']) + '」の残りは' + r2_(srcRemain) + unit +
+                                 'なので、あと' + r2_(delta) + unit + 'は足せません' };
+    }
+
+    const perU = num_(src['円/単位']);
+    const oldYen = num_(c['金額']);
+    const newYen = r2_(newQty * perU);
+    setCell_(shCons, c._row, col_('cons', '使用量'), newQty, '0.############');
+    setCell_(shCons, c._row, col_('cons', '金額'), newYen, '0.############');
+    c['使用量'] = newQty; c['金額'] = newYen;
+
+    const left = Math.max(0, Math.round((srcRemain - delta) * 1000) / 1000);
+    writeRemains_(shLots, [{ row: src._row, remain: left,
+                             status: left > 0.0005 ? '在庫あり' : '使い切り' }]);
+    src['残量'] = left;
+
+    const pq = num_(prep['内容量']);
+    const pBefore = num_(prep['金額']);
+    const pAfter = r2_(pBefore + (newYen - oldYen));
+    const pPerU = pq > 0 ? pAfter / pq : 0;
+    setCell_(shLots, prep._row, col_('lots', '金額'), pAfter, '0.############');
+    setCell_(shLots, prep._row, col_('lots', '円/単位'), pPerU, '0.############');
+    prep['金額'] = pAfter; prep['円/単位'] = pPerU;
+
+    const ctx = { lots: lots, cons: cons, shLots: shLots, shCons: shCons, touched: [], chained: [] };
+    if (pq > 0) repriceLotCons_(prepId, pPerU, ctx, 0);
+
+    return {
+      ok: true,
+      part: { id: id, name: String(c['品名']), unit: unit, before: oldQty, after: newQty,
+              yenBefore: r2_(oldYen), yenAfter: newYen, srcRemain: left },
+      prep: { id: prepId, name: String(prep['品名']), before: r2_(pBefore), after: pAfter,
+              perU: r2_(pPerU), unit: String(prep['単位'] || '') },
+      cons: ctx.touched,
+      chained: ctx.chained,
+      summary: buildSummary_(d2s_(c['日付'] || String(c['日時']).slice(0, 10)).slice(0, 7)),
+    };
+  } finally { lock.releaseLock(); }
 }
 
 
@@ -1314,6 +1396,7 @@ function buildDay_(date) {
       counted: counted,
       from: '在庫',
       id: String(c['消費ID']),
+      lotId: String(c['ロットID']),
     };
     // 作り置きを食べた記録には、食べた分に当たる材料の量を付けておく（あすけんへのコピー用）
     if (counted) {
