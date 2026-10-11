@@ -658,6 +658,26 @@ section('あすけん用：作り置きを材料に分ける');
   ok('そのまま食べた食材には材料が付かない', plain && !plain.parts, plain);
 }
 
+section('作り置きに入れ間違えた材料を、食べたあとでも外せる');
+{
+  const e = newEnv('2026-10-11T03:00:00Z');
+  const mk = (n, u, q, y) => { const f = e.call('addFood', { name: n, category: '常温', unit: u, tracked: true });
+    return e.call('addLots', { items: [{ foodId: f.food.id, qty: q, yen: y, unit: u, date: '2026-09-20' }] }).lots[0]; };
+  const rice = mk('お米', 'g', 1000, 498), chikuwa = mk('ちくわ', '本', 4, 105), oil = mk('こめ油', 'g', 100, 48);
+  const pr = e.call('record', { meal: '昼', datetime: '2026-09-22 13:56:00', makePrep: true, prepName: '磯辺揚げ', prepServings: 4,
+                                entries: [{ lotId: rice.id, qty: 450 }, { lotId: chikuwa.id, qty: 4 }, { lotId: oil.id, qty: 27 }] });
+  e.call('record', { meal: '夕', datetime: '2026-09-23 19:00:00', entries: [{ lotId: pr.prepLot.id, qty: 1 }] });
+  const riceRow = e.rows('消費').filter((c) => String(c['品名']) === 'お米')[0];
+  const r = e.call('deleteRecord', { id: String(riceRow['消費ID']) });
+  ok('食べたあとでも、入れ間違えた材料を外せる', r.ok === true, r.error);
+  const b = e.call('bootstrap', {});
+  ok('お米が在庫に戻る', near(b.lots.filter((l) => l.id === rice.id)[0].remain, 1000));
+  const p2 = b.lots.filter((l) => l.id === pr.prepLot.id)[0];
+  ok('作り置きの金額からお米の分が引かれる', near(p2.yen, 105 + 48 * 0.27), p2.yen);
+  const eaten = e.rows('消費').filter((c) => String(c['ロットID']) === pr.prepLot.id)[0];
+  ok('食べた1食の金額も引き直される', near(Number(eaten['金額']), (105 + 12.96) / 4), eaten['金額']);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
