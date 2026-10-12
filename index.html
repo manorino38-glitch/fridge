@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-11c';
+var APP_VERSION = '2026-10-12a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -1616,7 +1616,8 @@ function rowHtml(foodId, lots, cat) {
     '<div class="lab" style="margin-top:12px">このロット: ' + fmtQty(lot.qty, unit) + ' / ' + yen(lot.yen) +
       ' で ' + fmtMD(lot.date) + ' 購入</div>' +
     '<button class="lnk" data-act="fixyen" data-lot="' + esc(lot.id) + '">金額を直す</button>' +
-    (isPrep && !isPct ? '　<button class="lnk" data-act="fixqty" data-lot="' + esc(lot.id) + '">食数を直す</button>' : '') +
+    (isPrep && (!isPct || lot.remain >= lot.qty - 0.0005)
+      ? '　<button class="lnk" data-act="fixqty" data-lot="' + esc(lot.id) + '">' + (isPct ? '食数にする' : '食数を直す') + '</button>' : '') +
     (isPrep ? '' : '　<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
     (isPrep ? '' : '<button class="pbtn" data-act="pstart">毎日少しずつ飲むものにする（期間で割る）</button>') +
     '</div>';
@@ -2622,17 +2623,18 @@ function showFixQty(lotId) {
   if (!lot) return;
   var f = foodById(lot.foodId);
   var name = (f && f.name) || lot.name;
-  var unit = lot.unit || '食';
-  var used = Math.max(0, Math.round((lot.qty - lot.remain) * 1000) / 1000);
+  var pct = lot.unit === '%';                 // ％で登録してまだ食べていない作り置きを、食数に切り替える
+  var unit = pct ? '食' : (lot.unit || '食');
+  var used = pct ? 0 : Math.max(0, Math.round((lot.qty - lot.remain) * 1000) / 1000);
 
   openSheet(
     '<h3>食数を直す</h3>' +
     '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
-      '<div class="m">' + esc(fmtMD(lot.date)) + '作成　' + esc(fmtQty(lot.qty, unit)) + '　' + yen(lot.yen) +
-      '（' + esc(fmtUnitPrice(lot.perU, unit)) + '）' +
+      '<div class="m">' + esc(fmtMD(lot.date)) + '作成　' + (pct ? '％で登録' : esc(fmtQty(lot.qty, unit))) + '　' + yen(lot.yen) +
+      (pct ? '' : '（' + esc(fmtUnitPrice(lot.perU, unit)) + '）') +
       (used > 0 ? '<br>もう ' + esc(fmtQty(used, unit)) + ' 食べています' : '') + '</div></div>' +
     '<label class="fld"><span>ほんとうの食数</span>' +
-      '<div class="inw"><input id="fqN" inputmode="decimal" value="' + lot.qty + '"><i>' + esc(unit) + '</i></div></label>' +
+      '<div class="inw"><input id="fqN" inputmode="decimal" value="' + (pct ? '' : lot.qty) + '"><i>' + esc(unit) + '</i></div></label>' +
     '<div class="perg" id="fqOut">&nbsp;</div>' +
     '<p class="tiny muted" style="margin:2px 0 14px;line-height:1.8">' +
       '合計の金額は変わりません。1' + esc(unit) + 'あたりの値段が変わります。<br>' +
