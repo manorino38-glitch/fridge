@@ -1576,13 +1576,26 @@ function apiResizeLot_(p) {
     const lot = lots[lotId];
     if (!lot) return { ok: false, error: 'その作り置きが見つかりません' };
 
-    const unit = String(lot['単位'] || '');
-    if (unit === PREP_UNIT_LABEL) return { ok: false, error: '％で持っている作り置きは食数を直せません' };
+    let unit = String(lot['単位'] || '');
     const oldQty = num_(lot['内容量']);
     if (!(oldQty > 0)) return { ok: false, error: '内容量が0のものは直せません' };
 
     const remain = num_(lot['残量']);
-    const used = Math.max(0, Math.round((oldQty - remain) * 1000) / 1000);
+    let used = Math.max(0, Math.round((oldQty - remain) * 1000) / 1000);
+
+    // ％で登録した作り置きは、まだ一度も食べていなければ食数に切り替えられる
+    // （食数で登録し忘れたとき用）。食べたあとは％の記録と食数が混ざるので断る
+    const toServings = unit === PREP_UNIT_LABEL;
+    if (toServings) {
+      const eaten = readAll_('cons').some(function (c) { return String(c['ロットID']) === lotId; });
+      if (eaten || used > 0.0005) {
+        return { ok: false, error: '％で食べた記録があるので食数には切り替えられません' };
+      }
+      used = 0;
+      unit = PREP_SERVING_LABEL;
+      setCell_(shLots, lot._row, col_('lots', '単位'), unit);
+      lot['単位'] = unit;
+    }
     if (newQty < used - 0.0005) {
       return { ok: false, error: 'もう' + used + unit + '食べているので、' + used + unit + 'より少なくはできません' };
     }
@@ -1613,13 +1626,16 @@ function apiResizeLot_(p) {
     if (newest === lot) {
       const shF = sheet_('foods');
       const fr = findRow_(shF, col_('foods', '食材ID'), fid);
-      if (fr > 0) setCell_(shF, fr, col_('foods', '前回の量'), newQty);
+      if (fr > 0) {
+        setCell_(shF, fr, col_('foods', '前回の量'), newQty);
+        if (toServings) setCell_(shF, fr, col_('foods', '単位'), unit);
+      }
     }
 
     return {
       ok: true,
       lot: { id: lotId, name: String(lot['品名']), unit: unit,
-             before: oldQty, after: newQty, remain: newRemain, used: used,
+             before: oldQty, after: newQty, remain: newRemain, used: used, switched: toServings,
              yen: r2_(yen), perU: r2_(perU) },
       cons: ctx.touched,
       chained: ctx.chained,
