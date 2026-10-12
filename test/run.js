@@ -627,7 +627,8 @@ section('作り置きの食数を直す');
   const mk = e.call('record', { meal: '夕', datetime: '2026-10-09 19:00:00',
                                 makePrep: true, prepName: 'スープ',
                                 entries: [{ lotId: lot.id, qty: 300 }] });
-  ok('％の作り置きは断る', e.call('resizeLot', { lotId: mk.prepLot.id, qty: 4 }).ok === false);
+  e.call('record', { meal: '昼', datetime: '2026-10-09 20:00:00', entries: [{ lotId: mk.prepLot.id, qty: 25 }] });
+  ok('％で食べた作り置きは断る', e.call('resizeLot', { lotId: mk.prepLot.id, qty: 4 }).ok === false);
   ok('0は断る', e.call('resizeLot', { lotId: lot.id, qty: 0 }).ok === false);
   ok('ロットIDが無ければ断る', e.call('resizeLot', { qty: 3 }).ok === false);
 }
@@ -707,6 +708,29 @@ section('作り置きに入れた材料の量を直す');
   const it = day.items.filter((x) => x.kind === '作り置きへ振替' && x.name === 'お米')[0];
   ok('明細に材料のロットIDが付く', it && it.lotId === rice.id, it);
   ok('振替以外は断る', e.call('fixPrepPart', { id: String(eaten['消費ID']), qty: 3 }).ok === false);
+}
+
+section('％で登録した作り置きを、食べる前なら食数に切り替えられる');
+{
+  const e = newEnv('2026-10-12T03:00:00Z');
+  const f = e.call('addFood', { name: 'ホットケーキミックス', category: '常温', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 1000, yen: 343.44, unit: 'g', date: '2026-10-08' }] }).lots[0];
+  const mk = e.call('record', { meal: '朝', datetime: '2026-10-12 09:00:00', makePrep: true, prepName: 'プロテインホットケーキ',
+                                entries: [{ lotId: lot.id, qty: 240 }] });
+  ok('％で作れる', mk.ok && mk.prepLot.unit === '%', mk.error);
+  const r = e.call('resizeLot', { lotId: mk.prepLot.id, qty: 5 });
+  ok('食べる前なら5食に切り替えられる', r.ok === true && r.lot.switched === true, r.error);
+  const b = e.call('bootstrap', {});
+  const pl = b.lots.filter((l) => l.id === mk.prepLot.id)[0];
+  ok('単位が食・内容量と残りが5', pl.unit === '食' && pl.qty === 5 && near(pl.remain, 5), pl);
+  ok('合計金額はそのまま・1食あたりは÷5', near(pl.yen, mk.prepLot.yen) && near(pl.perU, mk.prepLot.yen / 5), pl);
+  const fd = b.foods.filter((x) => x.name === 'プロテインホットケーキ')[0];
+  ok('次に作るときも食数の5で始まる', fd.unit === '食' && fd.lastQty === 5, fd);
+
+  const mk2 = e.call('record', { meal: '朝', datetime: '2026-10-12 10:00:00', makePrep: true, prepName: '別の作り置き',
+                                 entries: [{ lotId: lot.id, qty: 100 }] });
+  e.call('record', { meal: '昼', datetime: '2026-10-12 12:00:00', entries: [{ lotId: mk2.prepLot.id, qty: 30 }] });
+  ok('％で食べたあとは切り替えない', e.call('resizeLot', { lotId: mk2.prepLot.id, qty: 4 }).ok === false);
 }
 
 console.log('\n────────────────────────');
