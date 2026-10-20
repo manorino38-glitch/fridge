@@ -733,6 +733,22 @@ section('％で登録した作り置きを、食べる前なら食数に切り�
   ok('％で食べたあとは切り替えない', e.call('resizeLot', { lotId: mk2.prepLot.id, qty: 4 }).ok === false);
 }
 
+section('小分けにした（何パックに分けて、いくつ冷凍したか）');
+{
+  const e = newEnv('2026-10-20T03:00:00Z');
+  const f = e.call('addFood', { name: '豚こま肉', category: 'チルド', unit: 'g', tracked: true });
+  const lot = e.call('addLots', { items: [{ foodId: f.food.id, qty: 475, yen: 558.28, unit: 'g', date: '2026-10-20' }] }).lots[0];
+  const r = e.call('setPacks', { lotId: lot.id, packs: 3, frozen: 2 });
+  ok('3パック・冷凍2で保存できる', r.ok === true && r.packs[lot.id].n === 3 && r.packs[lot.id].frozen === 2, r.error);
+  ok('1パックは残量の3等分', near(r.packs[lot.id].size, 475 / 3), r.packs[lot.id]);
+  ok('起動時に小分けの設定が届く', !!e.call('bootstrap', {}).packs[lot.id]);
+  ok('冷凍数がパック数より多いと断る', e.call('setPacks', { lotId: lot.id, packs: 2, frozen: 3 }).ok === false);
+  ok('パック数0で設定を消せる', e.call('setPacks', { lotId: lot.id, packs: 0 }).ok && !e.call('bootstrap', {}).packs[lot.id]);
+  ok('無いロットは断る', e.call('setPacks', { lotId: 'Lnone', packs: 2 }).ok === false);
+  e.call('record', { meal: '夕', datetime: '2026-10-20 19:00:00', entries: [{ lotId: lot.id, qty: 475 }] });
+  ok('使い切ったロットは小分けにできない', e.call('setPacks', { lotId: lot.id, packs: 2 }).ok === false);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
