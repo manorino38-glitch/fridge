@@ -111,6 +111,11 @@ const SERVING_CONF_KEY = 'servings';
    設定シートに「ロットID → 飲み始めた日・食事区分」をまとめて1行で持つ。
    飲み終わったら消すので、ここに残るのは飲んでいる最中のものだけ。 */
 const PERIOD_CONF_KEY = 'periods';
+
+/* 買ってきてすぐ小分けにしたもの（豚こまを160gずつ分けて冷凍、など）。
+   設定シートに「ロットID → 1パックの量・何パックに分けたか・そのうち冷凍した数」を1行で持つ。
+   残りが何パックかは残量から割り出すので、使うたびにここを書き換えなくていい。 */
+const PACK_CONF_KEY = 'packs';
 /** 按分した毎日の分を入れる食事区分と、明細に出す時刻 */
 const PERIOD_MEAL = '間食';
 const PERIOD_TIME = '15:30:00';
@@ -321,6 +326,7 @@ function dispatch_(action, p) {
     case 'fixLot':        return apiFixLot_(p);
     case 'resizeLot':     return apiResizeLot_(p);
     case 'fixPrepPart':   return apiFixPrepPart_(p);
+    case 'setPacks':      return apiSetPacks_(p);
     case 'readReceipt':   return apiReadReceipt_(p);
     case 'setOcrKey':     return apiSetOcrKey_(p);
     case 'ocrStatus':     return apiOcrStatus_(p);
@@ -382,6 +388,7 @@ function apiBootstrap_(p) {
     units:      getListConf_('units',      DEFAULT_UNITS),
     servings:   getServings_(),
     periods:    periodsOut_(),
+    packs:      getPacks_(),
     meals: MEALS,
     foods: foodOut,
     lots: stock,
@@ -1263,6 +1270,67 @@ function periodResult_() {
     .map(function (l) { return lotOut_(l, nameById); });
   return { ok: true, periods: periodsOut_(), lots: lots,
            summary: buildSummary_(today_().slice(0, 7)), day: buildDay_(today_()) };
+}
+
+/**
+ * 小分けの設定を読む。{ ロットID: { size, n, frozen } }
+ *   size   … 1パックの量（分けたときの残量 ÷ パック数）
+ *   n      … 何パックに分けたか
+ *   frozen … そのうち冷凍した数（使うときは冷蔵のほうから減っていく）
+ * 壊れていても止めずに「設定なし」として扱う。
+ */
+function getPacks_() {
+  const raw = getConf_(PACK_CONF_KEY);
+  if (!raw) return {};
+  try {
+    const o = JSON.parse(String(raw));
+    if (!o || typeof o !== 'object') return {};
+    const out = {};
+    Object.keys(o).forEach(function (k) {
+      const v = o[k] || {};
+      if (num_(v.size) > 0 && num_(v.n) >= 1) {
+        out[k] = { size: num_(v.size), n: Math.round(num_(v.n)), frozen: Math.max(0, Math.round(num_(v.frozen))) };
+      }
+    });
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * 小分けにした、を記録する（または消す）。
+ * いまの残量を n パックに等分したものを1パックとする。
+ * packs に 0 を渡すと小分けの設定を消す。
+ * 使い切ったロットの設定はここで掃除しておく（設定シートの1行が太り続けないように）。
+ */
+function apiSetPacks_(p) {
+  const lotId = String((p && p.lotId) || '');
+  if (!lotId) return { ok: false, error: 'どの仕入かが指定されていません' };
+  const n = Math.round(num_(p && p.packs));
+  const frozen = Math.round(num_(p && p.frozen));
+
+  const lots = {};
+  readAll_('lots').forEach(function (l) { lots[String(l['ロットID'])] = l; });
+  const all = getPacks_();
+  Object.keys(all).forEach(function (k) {
+    const l = lots[k];
+    if (!l || !(num_(l['残量']) > 0.0005)) delete all[k];
+  });
+
+  if (!(n > 0)) {
+    delete all[lotId];
+  } else {
+    const lot = lots[lotId];
+    if (!lot) return { ok: false, error: 'その仕入が見つかりません' };
+    const remain = num_(lot['残量']);
+    if (!(remain > 0.0005)) return { ok: false, error: 'もう残っていません' };
+    if (n > 50) return { ok: false, error: '50パックまでにしてください' };
+    if (frozen < 0 || frozen > n) return { ok: false, error: '冷凍した数はパック数までです' };
+    all[lotId] = { size: remain / n, n: n, frozen: frozen };
+  }
+  setConf_(PACK_CONF_KEY, JSON.stringify(all));
+  return { ok: true, packs: all };
 }
 
 function apiSetServing_(p) {
