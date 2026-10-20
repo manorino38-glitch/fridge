@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-12a';
+var APP_VERSION = '2026-10-20a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -615,6 +615,7 @@ var S = {
   categories: [], foods: [], lots: [], meals: ['朝','昼','夕','間食'], outKinds: [], units: ['g','ml','個','本','枚'],
   summary: null, day: null, serverDate: '', ym: '',
   servings: {},            // 食材ID -> 1食あたりの量（任意。入っているものだけ「あと何食」を出す）
+  packs: {},               // ロットID -> { size, n, frozen }  小分けにしたもの
   periods: {},             // ロットID -> { start, meal, spent, per }  期間で割っている最中のもの
   meal: '夕', mealTouched: false,
   recDate: '', recDateTouched: false,   // 冷蔵庫タブの記録日。既定は今日
@@ -697,6 +698,32 @@ function servingLeft(foodId, remain) {
   // 0.5食を「0食」と見せると、まだ飲めるのに空だと思わせてしまう。
   var n = Math.round((Number(remain) || 0) / per * 10) / 10;
   return 'あと' + n + '食';
+}
+
+/* ---- 小分けにしたもの ------------------------------------------------------
+ * 豚こまを160gずつ分けて冷凍、のように、買ってすぐ小分けにしたもの。
+ * 1パックの量は分けたときの残量を等分したもの。残りが何パックかは残量から割り出す。
+ * 最後の1パックは「そのとき残っている量ぜんぶ」にするので、ざっくり分けても端数が残らない。
+ * 使うときは冷蔵のぶんから減っていく（冷凍は後回し）。
+ * ------------------------------------------------------------------------*/
+function packInfo(lot) {
+  var p = lot && S.packs[lot.id];
+  if (!p || !(p.size > 0)) return null;
+  var remain = Number(lot.remain) || 0;
+  var left = remain > 0.0005 ? Math.max(1, Math.round(remain / p.size)) : 0;
+  var frozen = Math.min(p.frozen || 0, left);
+  return {
+    left: left, frozen: frozen, fridge: left - frozen, size: p.size,
+    next: left <= 1 ? remain : Math.min(remain, Math.round(p.size * 1000) / 1000),
+  };
+}
+function packLabel(pk) {
+  if (!pk) return '';
+  if (!pk.left) return '';
+  var t = 'あと' + pk.left + 'パック';
+  if (pk.frozen && pk.fridge) t += '（冷蔵' + pk.fridge + '・冷凍' + pk.frozen + '）';
+  else if (pk.frozen) t += '（ぜんぶ冷凍）';
+  return t;
 }
 
 function fmtUnitPrice(perU, u) {
@@ -826,6 +853,7 @@ function applyBootstrap(r) {
   S.units = r.units || S.units;
   S.servings = r.servings || {};
   S.periods = r.periods || {};
+  S.packs = r.packs || {};
   S.summary = r.summary;
   if (r.day) S.day = r.day;
   S.serverDate = r.serverDate;
@@ -1573,6 +1601,10 @@ function rowHtml(foodId, lots, cat) {
   // 1食あたりを決めてある食材は、量のあとに「あと何食」を足す
   var svLeft = isPrep ? '' : servingLeft(foodId, lot.remain);
   if (svLeft) sub = svLeft + ' · ' + sub;
+  // 小分けにしたものは、何パック残っているかを先頭に出す
+  var pk = isPct ? null : packInfo(lot);
+  if (pk && pk.left) sub = packLabel(pk) + ' · ' + sub;
+  var isPack = !!(pk && pk.left && q > 0 && Math.abs(q - pk.next) < 0.005);
   if (q > 0 && isWaste) sub = '捨てた分として引きます · ' + sub;
   if (q > 0 && isAdj)   sub = '数を合わせるだけ（食費に入れない） · ' + sub;
 
@@ -1588,7 +1620,9 @@ function rowHtml(foodId, lots, cat) {
       '<label class="qin"><input inputmode="decimal" enterkeyhint="done" data-k="pct" value="' + pctVal + '"><i>%</i></label>' +
       (isPct ? '' :
       '<label class="qin"><input inputmode="decimal" enterkeyhint="done" data-k="q" value="' + qVal + '"><i>' + esc(unit) + '</i></label>') +
-      '<button class="allb' + (isAll ? ' on' : '') + '" data-act="all">全</button>' +
+      (pk && pk.left
+        ? '<button class="allb' + (isPack ? ' on' : '') + '" data-act="pack">1P</button>'
+        : '<button class="allb' + (isAll ? ' on' : '') + '" data-act="all">全</button>') +
     '</div>';
 
   if (!open) return row;
@@ -1619,6 +1653,11 @@ function rowHtml(foodId, lots, cat) {
     (isPrep && (!isPct || lot.remain >= lot.qty - 0.0005)
       ? '　<button class="lnk" data-act="fixqty" data-lot="' + esc(lot.id) + '">' + (isPct ? '食数にする' : '食数を直す') + '</button>' : '') +
     (isPrep ? '' : '　<button class="lnk" data-act="editfood">単位や置き場を変える</button>') +
+    (isPct ? '' : '　<button class="lnk" data-act="packs" data-lot="' + esc(lot.id) + '">' +
+      (S.packs[lot.id] ? '小分けを直す' : '小分けにした') + '</button>') +
+    (pk && pk.left
+      ? '<div class="lab" style="margin-top:8px;line-height:1.7">「1P」で1パック分（' + esc(fmtQty(pk.next, unit)) +
+        '）が入ります。冷蔵のぶんから先に減ります。</div>' : '') +
     (isPrep ? '' : '<button class="pbtn" data-act="pstart">毎日少しずつ飲むものにする（期間で割る）</button>') +
     '</div>';
   return row + detail;
@@ -1818,6 +1857,15 @@ $('#v-fridge').addEventListener('click', function (e) {
   if (act === 'pstart')  { showStartPeriod(lot); return; }
   if (act === 'pfinish') { showFinishPeriod(lot); return; }
   if (act === 'pstop')   { showStopPeriod(lot); return; }
+  if (act === 'packs') { showPacks(btn.dataset.lot); return; }
+  if (act === 'pack') {
+    var pk = packInfo(lot);
+    if (!pk || !pk.left) return;
+    var cur2 = S.ent[lot.id] || 0;
+    if (Math.abs(cur2 - pk.next) < 0.005) delete S.ent[lot.id];
+    else S.ent[lot.id] = pk.next;
+    renderFridge(); renderFoot(); return;
+  }
   if (act === 'all' || act === 'all2') {
     var cur = S.ent[lot.id] || 0;
     if (Math.abs(cur - lot.remain) < 0.005) delete S.ent[lot.id];
@@ -2732,6 +2780,76 @@ function showFixPart(x) {
       toastErr((e && e.message) || '直せませんでした');
     });
   };
+}
+
+/* ---- 小分けにした ----------------------------------------------------------
+ * 何パックに分けて、そのうちいくつ冷凍したかを入れる。
+ * いまの残量を等分したものが1パックになる。
+ * ------------------------------------------------------------------------*/
+function showPacks(lotId) {
+  var lot = lotById(lotId);
+  if (!lot) return;
+  var f = foodById(lot.foodId);
+  var name = (f && f.name) || lot.name;
+  var unit = lot.unit || (f && f.unit) || 'g';
+  var cur = S.packs[lotId];
+  var pk = packInfo(lot);
+  var n0 = pk ? pk.left : 3;
+  var fz0 = pk ? pk.frozen : Math.max(0, n0 - 1);
+
+  openSheet(
+    '<h3>小分けにした</h3>' +
+    '<div class="delbox"><div class="t">' + esc(name) + '</div>' +
+      '<div class="m">いまの残り ' + esc(fmtQty(lot.remain, unit)) + '　' + yen(lot.remain * lot.perU) + '</div></div>' +
+    '<label class="fld"><span>何パックに分けた？</span>' +
+      '<div class="inw"><input id="pkN" inputmode="numeric" value="' + n0 + '"><i>パック</i></div></label>' +
+    '<label class="fld"><span>そのうち冷凍したのは？</span>' +
+      '<div class="inw"><input id="pkF" inputmode="numeric" value="' + fz0 + '"><i>パック</i></div></label>' +
+    '<div class="perg" id="pkOut">&nbsp;</div>' +
+    '<p class="tiny muted" style="margin:2px 0 14px;line-height:1.8">' +
+      'いまの残りを等分したものを1パックにします。冷蔵庫の行の「1P」で1パック分が入り、' +
+      '最後の1パックは残っている量をぜんぶ使った扱いになるので、端数は残りません。' +
+      '冷蔵のぶんから先に減っていきます。</p>' +
+    '<button class="btn" id="pkGo">この分け方にする</button>' +
+    (cur ? '<div style="height:9px"></div><button class="btn quiet" id="pkDel">小分けをやめる</button>' : '') +
+    '<div style="height:9px"></div>' +
+    '<button class="btn quiet" id="pkNo">やめる</button>'
+  );
+  var read = function () {
+    return { n: Math.round(parseFloat($('#pkN').value)), fz: Math.round(parseFloat($('#pkF').value) || 0) };
+  };
+  var paint = function () {
+    var v = read(), el = $('#pkOut');
+    if (!(v.n >= 1)) { el.textContent = 'パック数を入れてください'; return; }
+    if (v.fz < 0 || v.fz > v.n) { el.textContent = '冷凍した数はパック数までです'; return; }
+    el.textContent = '1パック 約' + fmtQty(Math.round(lot.remain / v.n), unit) + '・約' + yen(lot.remain * lot.perU / v.n) +
+      '（冷蔵' + (v.n - v.fz) + '・冷凍' + v.fz + '）';
+  };
+  $('#pkN').oninput = paint; $('#pkF').oninput = paint; paint();
+  $('#pkNo').onclick = closeSheet;
+  var send = function (n, fz, btnId, label) {
+    var b = $(btnId);
+    b.disabled = true; b.textContent = '保存しています…';
+    call('setPacks', { lotId: lotId, packs: n, frozen: fz }, opId()).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '保存できませんでした');
+      S.packs = r.packs || {};
+      closeSheet();
+      delete S.ent[lotId];
+      renderFridge(); renderFoot();
+      toast(n > 0 ? name + ' を' + n + 'パックにしました' : name + ' の小分けをやめました');
+    }).catch(function (e) {
+      var b2 = $(btnId);
+      if (b2) { b2.disabled = false; b2.textContent = label; }
+      toastErr((e && e.message) || '保存できませんでした');
+    });
+  };
+  $('#pkGo').onclick = function () {
+    var v = read();
+    if (!(v.n >= 1)) return toastErr('パック数を入れてください');
+    if (v.fz < 0 || v.fz > v.n) return toastErr('冷凍した数はパック数までです');
+    send(v.n, v.fz, '#pkGo', 'この分け方にする');
+  };
+  if ($('#pkDel')) $('#pkDel').onclick = function () { send(0, 0, '#pkDel', '小分けをやめる'); };
 }
 
 function showEditFood(foodId) { showFoodSheet(foodId); }
