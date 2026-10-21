@@ -281,14 +281,33 @@ section('レシート読取：混んでいたら投げ直す');
   }
 
   {
-    // 429は投げすぎのサイン。投げ直すと悪化するので一度で引く
+    // 429は回数の上限。同じモデルに投げ直さず、別のモデルへ1回ずつ回して、二周目はしない
     const e = newEnv();
     e.call('setOcrKey', { key: 'x'.repeat(30) });
     e.net.reply = () => ({ code: 429, body: JSON.stringify({ error: { message: 'Too many requests' } }) });
     e.net.fetches.length = 0;
     const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
-    ok('回数制限なら投げ直さない', e.net.fetches.length === 1, e.net.fetches.length);
+    ok('回数制限なら各モデル1回ずつで止める', e.net.fetches.length === 3, e.net.fetches.length);
     ok('間を空けるよう伝える', /空けて/.test(r.error), r.error);
+  }
+
+  {
+    // 2026-10-21：3.6-flashだけ上限（quota）に当たった。別のモデルでは読めるので、そちらで読む
+    const e = newEnv();
+    e.call('setOcrKey', { key: 'x'.repeat(30) });
+    e.net.reply = (url, params) => {
+      const body = JSON.parse(params.payload);
+      if (body.model === 'gemini-3.6-flash') return { code: 429, body: JSON.stringify({ error: { message: 'Your project has exceeded a quota.' } }) };
+      return { code: 200, body: good };
+    };
+    e.net.fetches.length = 0;
+    const r = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('上限に当たったモデルを飛ばして読める', r.ok === true && r.receipt.items.length === 1, r.error);
+    ok('2回目で読めた', e.net.fetches.length === 2, e.net.fetches.length);
+
+    e.net.reply = () => ({ code: 429, body: JSON.stringify({ error: { message: 'Your project has exceeded a quota.' } }) });
+    const r2 = e.call('readReceipt', { image: 'AAAA', mime: 'image/jpeg' });
+    ok('全部上限なら上限だと伝える', r2.ok === false && /上限/.test(r2.error), r2.error);
   }
 
   {
