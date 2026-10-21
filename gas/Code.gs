@@ -1777,8 +1777,9 @@ const OCR_ROUNDS = 2;
 
 /**
  * もう一度試す価値のあるHTTPステータスか。
- * 429（投げすぎ）は投げ直すと状況が悪くなるだけなので、ここには入れない。
- * キーの単位で掛かる制限なので、モデルを変えても逃げられない。
+ * 429（回数の上限）は同じモデルに投げ直しても状況が悪くなるだけなので、ここには入れない。
+ * ただし上限はモデルごとに数えられているので、別のモデルへは回す（下の apiReadReceipt_ で扱う）。
+ * 2026-10-21、3.6-flashだけ上限に当たって1回目で止まり、読み取れなかったことがある。
  */
 function ocrShouldRetry_(code) {
   return code === 500 || code === 502 || code === 503 || code === 504;
@@ -1926,11 +1927,12 @@ function apiReadReceipt_(p) {
   const attempts = [];          // 1回ごとの結果。失敗の理由を後から追えるように残す
   const started = Date.now();
   let best = null;              // いちばんましだった読み取り結果
+  let saw429 = false;           // 回数の上限に当たったモデルがあった（二周目はしない）
 
   outer:
   for (let round = 0; round < OCR_ROUNDS; round++) {
     // どこかのモデルが返事はくれた（中身が空だっただけ）なら、もう一周しても同じなので打ち切る
-    if (round > 0 && best) break;
+    if (round > 0 && (best || saw429)) break;
     if (round > 0) Utilities.sleep(OCR_ROUND_WAIT);
     for (let mi = 0; mi < models.length; mi++) {
       tries++;
@@ -1976,6 +1978,7 @@ function apiReadReceipt_(p) {
         continue;
       }
       attempts.push({ model: usedModel, code: code, ms: Date.now() - t0, msg: ocrErrMsg_(text) });
+      if (code === 429) { saw429 = true; continue; }            // そのモデルの上限。別のモデルなら通ることがある
       if (code !== 0 && !ocrShouldRetry_(code)) break outer;   // キー違いなどは投げ直しても同じ
     }
   }
@@ -2153,6 +2156,7 @@ function ocrHttpError_(code, text) {
   try { const j = JSON.parse(text); msg = (j && j.error && (j.error.message || j.error.status)) || ''; } catch (e) {}
   if (code === 400 && /api[ _-]?key/i.test(msg)) return 'キーが正しくないようです。設定から貼り直してください';
   if (code === 401 || code === 403) return 'キーが使えませんでした。設定から貼り直してください';
+  if (code === 429 && /quota/i.test(msg)) return '読み取りの上限に達していました（どのモデルも）。時間をおいてからもう一度';
   if (code === 429) return '読み取りの回数が立て込んでいます。1分ほど空けてからもう一度';
   if (code >= 500) return '読み取り側がどのモデルも混み合っていました。少し時間をおいてからもう一度';
   return '読み取りに失敗しました（' + code + '）' + (msg ? ': ' + msg.slice(0, 120) : '');
