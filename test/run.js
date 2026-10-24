@@ -768,6 +768,20 @@ section('小分けにした（何パックに分けて、いくつ冷凍した�
   ok('使い切ったロットは小分けにできない', e.call('setPacks', { lotId: lot.id, packs: 2 }).ok === false);
 }
 
+section('単位の欄に数字を入れたら止める');
+{
+  const e = newEnv('2026-10-24T03:00:00Z');
+  const r = e.call('addFood', { name: '韓国のりふりかけ', category: '常温', unit: '70', tracked: true });
+  ok('単位が「70」なら登録しない', r.ok === false && /数字/.test(r.error), r);
+  ok('「70g」も止める', e.call('addFood', { name: 'x', category: '常温', unit: '70g', tracked: true }).ok === false);
+  ok('全角数字も止める', e.call('addFood', { name: 'y', category: '常温', unit: '７０', tracked: true }).ok === false);
+  const f = e.call('addFood', { name: '韓国のりふりかけ', category: '常温', unit: 'g', tracked: true });
+  ok('gなら登録できる', f.ok === true);
+  ok('袋のような言葉の単位は通る', e.call('addFood', { name: 'z', category: '常温', unit: '袋', tracked: true }).ok === true);
+  ok('直すときも数字は止める', e.call('updateFood', { id: f.food.id, unit: '70' }).ok === false);
+  ok('直すときgは通る', e.call('updateFood', { id: f.food.id, unit: 'g' }).ok === true);
+}
+
 console.log('\n────────────────────────');
 console.log(`  ${pass} 件成功 / ${fail} 件失敗`);
 console.log('────────────────────────');
