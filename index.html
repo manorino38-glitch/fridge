@@ -452,7 +452,7 @@ var IS_GAS = (typeof google !== 'undefined' && google.script && google.script.ru
 
 /* この版の番号。version.txt と必ず同じ文字列にすること。
    ずれていたら、端末が古い版を握っているという意味なので入れ替える。 */
-var APP_VERSION = '2026-10-20a';
+var APP_VERSION = '2026-10-24a';
 
 /* ---- 設定の保存先 --------------------------------------------------------
  * localStorage が使えない端末がある（Safariの「すべてのCookieをブロック」など）。
@@ -2502,9 +2502,15 @@ function bindUnitTags() {
       var wrap = document.createElement('div');
       wrap.className = 'inw wide';
       wrap.style.marginTop = '8px';
-      wrap.innerHTML = '<input id="uFree" placeholder="単位（例: 束・丁・杯）" value="' + esc(cur) + '" autocapitalize="off">';
+      wrap.innerHTML = '<input id="uFree" placeholder="単位（例: 束・丁・杯）" value="' + esc(cur) + '" autocapitalize="off">' +
+        '<div class="tiny" id="uWarn" style="color:var(--danger);margin-top:6px;line-height:1.7"></div>';
       if (!$('#uFree')) box.parentNode.insertBefore(wrap, box.nextSibling);
-      $('#uFree').oninput = function () { $('#uVal').value = this.value.trim() || 'g'; paintServUnit(); };
+      $('#uFree').oninput = function () {
+        $('#uVal').value = this.value.trim() || 'g'; paintServUnit();
+        // 打っている途中で気づけるように、数字が入ったらその場で知らせる
+        var w = $('#uWarn');
+        if (w) w.textContent = /[0-9０-９]/.test(this.value) ? '単位に数字が入っています。内容量（70gなど）は仕入のときに入れます' : '';
+      };
       $('#uFree').focus();
       $$('#uTags .tag').forEach(function (c) { c.classList.toggle('on', c === b); });
       return;
@@ -2563,6 +2569,10 @@ function showFoodSheet(foodId) {
     var name = $('#nName').value.trim();
     if (!name) return;
     var body = { name: name, category: $('#cVal').value, unit: $('#uVal').value, aliases: $('#nAlias').value.trim(), tracked: true };
+    // 内容量（70gの「70」）を単位の欄に書いてしまう間違いを、保存する前に止める
+    if (/[0-9０-９]/.test(body.unit)) {
+      return toastErr('単位に数字が入っています（「' + body.unit + '」）。単位は g・個・袋 などの言葉だけにして、内容量は仕入のときに入れてください');
+    }
     var serv = Number(($('#nServ') || {}).value) || 0;
     $('#nGo').disabled = true;
 
