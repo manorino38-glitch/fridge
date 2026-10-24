@@ -402,9 +402,24 @@ function apiSummary_(p) {
   return { ok: true, summary: buildSummary_(p.ym || today_().slice(0, 7)), day: buildDay_(today_()) };
 }
 
+/**
+ * 単位に数字が入っていないか。内容量（70gの「70」）を単位の欄に書いてしまう間違いを止める。
+ * 2026-10-24、韓国のりふりかけを登録するとき単位に「70」と入れてしまったことがあった。
+ * 単位は g・個・袋 のような言葉だけで、量は仕入のときに入れる。
+ */
+function unitError_(u) {
+  const s = String(u == null ? '' : u).trim();
+  if (/[0-9０-９]/.test(s)) {
+    return '単位に数字が入っています（「' + s + '」）。単位は g・個・袋 などの言葉だけにして、内容量は仕入のときに入れてください';
+  }
+  return '';
+}
+
 function apiAddFood_(p) {
   const name = String(p.name || '').trim();
   if (!name) return { ok: false, error: '品名が空です' };
+  const ue = unitError_(p.unit);
+  if (ue) return { ok: false, error: ue };
 
   const foods = readAll_('foods');
   const dup = foods.filter(function (f) { return String(f['品名']) === name; })[0];
@@ -435,6 +450,10 @@ function apiAddFood_(p) {
 }
 
 function apiUpdateFood_(p) {
+  if (p.unit != null) {
+    const ue = unitError_(p.unit);
+    if (ue) return { ok: false, error: ue };
+  }
   const sh = sheet_('foods');
   const r = findRow_(sh, col_('foods', '食材ID'), String(p.id));
   if (r < 0) return { ok: false, error: '食材が見つかりません' };
